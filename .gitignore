@@ -1,0 +1,5 @@
+node_modules/
+test/out/
+test/e2e-downloads/
+test/fixtures/
+test/browser/

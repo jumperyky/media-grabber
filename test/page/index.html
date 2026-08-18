@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>テスト用の動画ページ</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; padding: 24px; }
+      video { width: 480px; background: #000; }
+      #log { color: #555; font-size: 12px; white-space: pre-line; }
+    </style>
+  </head>
+  <body>
+    <h1>テスト用の動画ページ</h1>
+
+    <!-- 直リンクの動画（<video> 要素として検出される） -->
+    <video id="v" src="/direct/sample.mp4" controls muted playsinline></video>
+
+    <p id="log">読み込み中…</p>
+
+    <script>
+      // 実際の動画プレイヤーと同様に、マニフェストを取得してストリームを検出させる
+      const log = document.getElementById('log');
+      const lines = [];
+      function note(text) {
+        lines.push(text);
+        log.textContent = lines.join('\n');
+      }
+
+      document.getElementById('v').play().catch(() => note('自動再生はブロックされました（検出には影響しません）'));
+
+      (async () => {
+        for (const url of ['/hls-master/master.m3u8', '/dash/manifest.mpd']) {
+          try {
+            const res = await fetch(url);
+            note(url + ' -> ' + res.status);
+          } catch (err) {
+            note(url + ' -> 失敗: ' + err.message);
+          }
+        }
+        note('ready');
+      })();
+    </script>
+  </body>
+</html>
