@@ -304,11 +304,57 @@ async function main() {
     check('MP4 が再生可能で 6 秒', mp4Info.hasVideo && Math.abs(mp4Info.duration - 6) < 0.6, JSON.stringify(mp4Info));
 
     // ---------------------------------------------------------------
-    section('5. ジョブの状態を確認する');
+    section('5. DASH を保存して結合用 .bat を得る');
+    const clickedDash = await cdp.evaluate(popup, clickExpr('DASH'));
+    check('DASH 項目のダウンロードボタンを押せた', clickedDash === 'clicked', String(clickedDash));
+
+    const mergeBat = await waitFor('結合用 .bat の保存', () => {
+      const bats = listFiles(downloadDir).filter((f) => /\.結合\.bat$/.test(f));
+      return bats.length ? bats[0] : null;
+    }, 60000, 700);
+    const videoPart = listFiles(downloadDir).find((f) => /\.video\.mp4$/.test(f));
+    const audioPart = listFiles(downloadDir).find((f) => /\.audio\.mp4$/.test(f));
+    check('映像パートが保存される', !!videoPart, String(videoPart));
+    check('音声パートが保存される', !!audioPart, String(audioPart));
+    check('結合用の .bat が一緒に保存される', !!mergeBat, String(mergeBat));
+
+    const mergeText = fs.readFileSync(mergeBat, 'utf8');
+    check('.bat が映像・音声の実ファイル名を参照している',
+      mergeText.includes(path.basename(videoPart)) && mergeText.includes(path.basename(audioPart)),
+      mergeText.slice(0, 200));
+
+    // 保存された .bat をそのまま実行して MP4 になるか確かめる
+    const batDir = path.dirname(mergeBat);
+    // 既定の名前は直リンクの保存結果と衝突するため、名前を指定して結合させる。
+    // そうしないと「実行前から存在していたファイル」を見て合格してしまう。
+    const mergedName = 'merged-by-bat';
+    const mergedOut = path.join(batDir, mergedName + '.mp4');
+    check('実行前は結合結果が存在しない', !fs.existsSync(mergedOut), mergedOut);
+
+    let batRun;
+    try {
+      batRun = execFileSync('cmd.exe', ['/c', mergeBat], {
+        cwd: batDir,
+        input: mergedName + String.fromCharCode(13, 10),
+        timeout: 60000,
+      });
+    } catch (err) {
+      batRun = Buffer.concat([err.stdout || Buffer.alloc(0), err.stderr || Buffer.alloc(0)]);
+    }
+    check('.bat を実行すると入力した名前で MP4 ができる', fs.existsSync(mergedOut),
+      batRun.toString('utf8').slice(0, 300));
+    if (fs.existsSync(mergedOut)) {
+      const merged = probeFile(mergedOut);
+      check('結合結果に映像と音声が揃う', merged.hasVideo && merged.hasAudio, JSON.stringify(merged));
+      check('結合結果の長さが 6 秒', Math.abs(merged.duration - 6) < 0.6, String(merged.duration));
+    }
+
+    // ---------------------------------------------------------------
+    section('6. ジョブの状態を確認する');
     const jobStates = await cdp.evaluate(popup,
       'chrome.runtime.sendMessage({type:"LIST", tabId:' + contentTabId + '}).then(r => r.jobs.map(j => j.state + (j.error ? ":" + j.error : "")))');
     check('失敗したジョブが無い', !jobStates.some((s) => s.startsWith('error')), JSON.stringify(jobStates));
-    check('完了したジョブが 2 件', jobStates.filter((s) => s === 'done').length >= 2, JSON.stringify(jobStates));
+    check('完了したジョブが 3 件', jobStates.filter((s) => s === 'done').length >= 3, JSON.stringify(jobStates));
 
     console.log('\n保存されたファイル:');
     for (const f of listFiles(downloadDir)) {

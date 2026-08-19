@@ -332,10 +332,17 @@ function renderJob(job) {
     for (const f of job.files) {
       node.append(el('div', 'item-meta', f.filename + (f.bytes ? ' · ' + formatBytes(f.bytes) : '')));
     }
-    // 映像と音声が別ファイルになった場合は結合コマンドを案内する
+    // .bat を一緒に保存できていれば、そちらを案内する
+    const helper = job.files.find((f) => f.role === 'helper');
     const v = job.files.find((f) => f.role === 'video');
     const a = job.files.find((f) => f.role === 'audio');
-    if (v && a) {
+
+    if (helper) {
+      const hint = el('div', 'hint');
+      hint.append(document.createTextNode(
+        helper.filename + ' をダブルクリックすると MP4 にできます。保存名はその場で変更できます。'));
+      node.append(hint);
+    } else if (v && a) {
       const out = v.filename.replace(/\.video\.[a-z0-9]+$/i, '.mp4');
       const hint = el('div', 'hint');
       hint.append(document.createTextNode('映像と音声が別ファイルです。次のコマンドで結合できます:'));
@@ -394,6 +401,7 @@ function applySettings(settings) {
   document.getElementById('subfolder').value = settings.subfolder;
   document.getElementById('concurrency').value = settings.concurrency;
   document.getElementById('saveAs').checked = settings.saveAs;
+  document.getElementById('saveHelperBat').checked = settings.saveHelperBat;
   settingsEl.dataset.loaded = '1';
 }
 
@@ -408,6 +416,7 @@ document.getElementById('save-settings').addEventListener('click', async () => {
       subfolder: document.getElementById('subfolder').value.trim(),
       concurrency: Math.max(1, Math.min(16, Number(document.getElementById('concurrency').value) || 6)),
       saveAs: document.getElementById('saveAs').checked,
+      saveHelperBat: document.getElementById('saveHelperBat').checked,
     },
   });
   statusEl.textContent = '設定を保存しました';

@@ -1,12 +1,13 @@
 {
   "name": "media-grabber",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "ページ上の動画を端末に保存する Chrome 拡張機能（HLS / DASH / 直リンク対応）",
   "type": "module",
   "scripts": {
-    "test": "node test/run-tests.js && node test/test-extension.js && node test/e2e-chrome.js",
+    "test": "node test/run-tests.js && node test/test-batch.js && node test/test-extension.js && node test/e2e-chrome.js",
     "test:core": "node test/run-tests.js",
+    "test:bat": "node test/test-batch.js",
     "test:ext": "node test/test-extension.js",
     "test:e2e": "node test/e2e-chrome.js",
     "fixtures": "node tools/make-fixtures.mjs",
