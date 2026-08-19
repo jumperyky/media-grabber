@@ -99,12 +99,25 @@ export function concatBytes(parts) {
   return out;
 }
 
+/** AES-128 復号用のヘルパー関数 */
+async function decryptSegment(ciphertext, keyBuf, ivBuf) {
+  const key = await crypto.subtle.importKey(
+    'raw', keyBuf, { name: 'AES-CBC' }, false, ['decrypt']
+  );
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-CBC', iv: ivBuf }, key, ciphertext
+  );
+  return new Uint8Array(plaintext);
+}
+
 /** HLS のメディアプレイリストを 1 本のバイト列にする。 */
 async function downloadHlsMedia(playlistUrl, opts) {
   const text = await fetchText(playlistUrl, opts);
   const playlist = parseM3U8(text, playlistUrl);
   if (playlist.type !== 'media') throw new DownloadError('メディアプレイリストではありません', 'BAD_PLAYLIST');
-  if (playlist.encryption) {
+  
+  // 変更: AES-128の場合は例外を投げずに処理を続行する
+  if (playlist.encryption && playlist.encryption.method !== 'AES-128') {
     throw new DownloadError(
       '暗号化されたストリーム (' + playlist.encryption.method + ') には対応していません',
       'ENCRYPTED',
@@ -112,11 +125,47 @@ async function downloadHlsMedia(playlistUrl, opts) {
   }
   if (!playlist.segments.length) throw new DownloadError('セグメントが見つかりません', 'NO_SEGMENTS');
 
+  // 追加: 鍵の取得
+  let keyData = null;
+  if (playlist.encryption && playlist.encryption.method === 'AES-128') {
+    if (!playlist.encryption.uri) throw new DownloadError('暗号化キーの URI がありません', 'ENCRYPTED');
+    keyData = await fetchBytes(playlist.encryption.uri, opts);
+  }
+
   const list = [];
   if (playlist.initSegment) list.push(playlist.initSegment);
   for (const s of playlist.segments) list.push(s);
 
   const got = await fetchAllSegments(list, opts);
+
+  // 追加: 各セグメントの復号処理
+  if (keyData) {
+    let seq = playlist.mediaSequence || 0;
+    let mediaIndex = 0;
+    for (let i = 0; i < got.parts.length; i++) {
+      if (!got.parts[i]) continue;
+      
+      // Init Segment は通常暗号化されないためスキップする
+      if (playlist.initSegment && i === 0) continue;
+
+      let ivData;
+      if (playlist.encryption.iv) {
+        // M3U8にIVが明記されている場合
+        const hex = String(playlist.encryption.iv).replace('0x', '');
+        ivData = new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+      } else {
+        // IVが省略されている場合は、シーケンス番号をIVとして使用する
+        ivData = new Uint8Array(16);
+        const view = new DataView(ivData.buffer);
+        view.setUint32(12, seq + mediaIndex, false);
+      }
+      
+      // 復号
+      got.parts[i] = await decryptSegment(got.parts[i], keyData, ivData);
+      mediaIndex++;
+    }
+  }
+
   const data = concatBytes(got.parts);
   return {
     data,
@@ -225,7 +274,8 @@ export async function probeStream(kind, manifestUrl, opts = {}) {
         duration: parsed.duration,
         segmentCount: parsed.segments.length,
         isLive: parsed.isLive,
-        encrypted: !!parsed.encryption,
+        // 修正: AES-128以外の暗号化の場合のみ true にする
+        encrypted: !!parsed.encryption && parsed.encryption.method !== 'AES-128',
       };
     }
 
@@ -243,7 +293,8 @@ export async function probeStream(kind, manifestUrl, opts = {}) {
           duration = media.duration;
           segmentCount = media.segments.length;
           isLive = media.isLive;
-          encrypted = !!media.encryption;
+          // 修正: AES-128以外の暗号化の場合のみ true にする
+          encrypted = !!media.encryption && media.encryption.method !== 'AES-128';
         }
       } catch { /* 取得できなくても画質一覧は返す */ }
     }

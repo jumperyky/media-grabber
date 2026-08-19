@@ -87,6 +87,7 @@ function parseMedia(lines, baseUrl) {
   let initSegment = null;
   let encryption = null;
   let targetDuration = 0;
+  let mediaSequence = 0; // 追加: シーケンス番号
   let hasEndList = false;
   let pendingDuration = 0;
   let pendingByteRange = null;
@@ -94,23 +95,36 @@ function parseMedia(lines, baseUrl) {
   for (const line of lines) {
     if (line.startsWith('#EXT-X-TARGETDURATION:')) {
       targetDuration = Number(line.split(':')[1]) || 0;
+    } else if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) { // 追加
+      mediaSequence = Number(line.split(':')[1]) || 0;
     } else if (line.startsWith('#EXT-X-ENDLIST')) {
       hasEndList = true;
     } else if (line.startsWith('#EXT-X-KEY:')) {
+      // 変更: 暗号化方式だけでなく、URIとIVも保持する
       const a = parseAttributes(line.slice('#EXT-X-KEY:'.length));
-      encryption = a.METHOD && a.METHOD !== 'NONE' ? { method: a.METHOD } : null;
+      if (a.METHOD && a.METHOD !== 'NONE') {
+        encryption = {
+          method: a.METHOD,
+          uri: a.URI ? resolveUrl(a.URI, baseUrl) : null,
+          iv: a.IV || null
+        };
+      }
     } else if (line.startsWith('#EXT-X-MAP:')) {
       const a = parseAttributes(line.slice('#EXT-X-MAP:'.length));
       if (a.URI) {
-        initSegment = { url: resolveUrl(a.URI, baseUrl), byteRange: parseByteRange(a.BYTERANGE) };
+        initSegment = {
+          url: resolveUrl(a.URI, baseUrl),
+          byteRange: a.BYTERANGE || null,
+        };
       }
     } else if (line.startsWith('#EXTINF:')) {
-      pendingDuration = parseFloat(line.slice('#EXTINF:'.length).split(',')[0]) || 0;
+      const parts = line.slice('#EXTINF:'.length).split(',');
+      pendingDuration = Number(parts[0]) || 0;
     } else if (line.startsWith('#EXT-X-BYTERANGE:')) {
-      pendingByteRange = parseByteRange(line.slice('#EXT-X-BYTERANGE:'.length));
-    } else if (!line.startsWith('#')) {
+      pendingByteRange = line.slice('#EXT-X-BYTERANGE:'.length);
+    } else if (!line.startsWith('#') && line.trim() !== '') {
       segments.push({
-        url: resolveUrl(line, baseUrl),
+        url: resolveUrl(line.trim(), baseUrl),
         duration: pendingDuration,
         byteRange: pendingByteRange,
       });
@@ -120,12 +134,14 @@ function parseMedia(lines, baseUrl) {
   }
 
   const duration = segments.reduce((sum, s) => sum + (s.duration || 0), 0);
+
   return {
     type: 'media',
     segments,
     initSegment,
     encryption,
     targetDuration,
+    mediaSequence, // 追加
     isLive: !hasEndList,
     duration,
   };
