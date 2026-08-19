@@ -335,7 +335,7 @@ async function main() {
     try {
       batRun = execFileSync('cmd.exe', ['/c', mergeBat], {
         cwd: batDir,
-        input: mergedName + String.fromCharCode(13, 10),
+        input: mergedName + String.fromCharCode(13, 10) + String.fromCharCode(13, 10),
         timeout: 60000,
       });
     } catch (err) {

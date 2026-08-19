@@ -46,17 +46,47 @@ function requireFfmpeg() {
 }
 
 /**
- * 保存名をたずねる。
- * 何も入力せずに Enter を押した場合は既定の名前を使う。
- * 拡張子が .mp4 でなければ補い、既にあるファイルは上書き確認する。
+ * 保存名を決める。第 1 引数があればそれを使い、無ければ入力を求める。
+ * 何も入力せずに Enter を押した場合は既定の名前を使う。拡張子が .mp4 でなければ補う。
  */
 function askOutputName() {
   return [
-    'set "NEWNAME="',
-    'set /p "NEWNAME=保存する名前 (Enter でそのまま: %OUTPUT%): "',
+    'set "NEWNAME=%~1"',
+    'if "%NEWNAME%"=="" set /p "NEWNAME=保存する名前 (Enter でそのまま: %OUTPUT%): "',
     'if not "%NEWNAME%"=="" set "OUTPUT=%NEWNAME%"',
     'if /i not "%OUTPUT:~-4%"==".mp4" set "OUTPUT=%OUTPUT%.mp4"',
     '',
+  ];
+}
+
+/**
+ * 音ズレの補正値をたずねる。
+ *
+ * 正の値を指定すると音声を遅らせる（音声が先に聞こえるときに使う）。
+ * 負の値は音声を早めることになるが、音声側をマイナス方向にずらすと
+ * タイムスタンプが負になって 0 に丸められてしまうため、代わりに映像側を遅らせる。
+ */
+function askOffset() {
+  return [
+    'set "OFFSET=%~2"',
+    'if "%OFFSET%"=="" echo.',
+    'if "%OFFSET%"=="" echo 音ズレがある場合は秒数で補正できます。例 0.2 または -0.15',
+    'if "%OFFSET%"=="" echo   音声が先に聞こえるなら 正の値',
+    'if "%OFFSET%"=="" echo   音声が後から聞こえるなら 負の値',
+    'if "%OFFSET%"=="" set /p "OFFSET=音ズレ補正の秒数 (Enter で補正なし): "',
+    'if "%OFFSET%"=="" set "OFFSET=0"',
+    '',
+    'set "OFFV="',
+    'set "OFFA="',
+    'if "%OFFSET:~0,1%"=="-" set "OFFV=-itsoffset %OFFSET:~1%"',
+    'if not "%OFFSET:~0,1%"=="-" if not "%OFFSET%"=="0" set "OFFA=-itsoffset %OFFSET%"',
+    '',
+  ];
+}
+
+/** 同名ファイルがある場合の上書き確認。 */
+function confirmOverwrite() {
+  return [
     'set "YN=y"',
     'if exist "%OUTPUT%" (set "YN="&set /p "YN=%OUTPUT% は既にあります。上書きしますか? [y/N]: ")',
     'if /i not "%YN%"=="y" ' + bail('中止しました。'),
@@ -65,7 +95,7 @@ function askOutputName() {
 }
 
 /** 実行して結果を伝える部分。 */
-function runAndReport(command) {
+function runAndReport(command, extraNote) {
   return [
     'echo.',
     'echo 処理しています... (再エンコードしないためすぐ終わります)',
@@ -73,6 +103,7 @@ function runAndReport(command) {
     'if errorlevel 1 ' + bail('失敗しました。上に表示されたメッセージを確認してください。'),
     'echo.',
     'echo 完了しました: %OUTPUT%',
+    ...(extraNote ? ['echo ' + extraNote] : []),
     'echo.',
     'pause',
   ];
@@ -102,13 +133,19 @@ export function buildMergeBat({ videoFile, audioFile, outputFile }) {
     '',
     ...requireFfmpeg(),
     ...askOutputName(),
-    ...runAndReport('ffmpeg -hide_banner -loglevel error -y -i "%VIDEO%" -i "%AUDIO%" -c copy "%OUTPUT%"'),
+    ...askOffset(),
+    ...confirmOverwrite(),
+    ...runAndReport(
+      'ffmpeg -hide_banner -loglevel error -y %OFFV% -i "%VIDEO%" %OFFA% -i "%AUDIO%" -c copy "%OUTPUT%"',
+      'ズレが残る場合は、もう一度実行して補正値を変えてください。',
+    ),
   ]);
 }
 
 /**
  * 1 本の .ts などを MP4 に変換するバッチファイル。
  * こちらも入れ物を作り直すだけで、再エンコードはしない。
+ * 映像と音声が同じファイルに入っているため、音ズレ補正は用意しない。
  */
 export function buildConvertBat({ inputFile, outputFile }) {
   return join([
@@ -127,6 +164,7 @@ export function buildConvertBat({ inputFile, outputFile }) {
     '',
     ...requireFfmpeg(),
     ...askOutputName(),
+    ...confirmOverwrite(),
     ...runAndReport('ffmpeg -hide_banner -loglevel error -y -i "%INPUT%" -c copy "%OUTPUT%"'),
   ]);
 }
