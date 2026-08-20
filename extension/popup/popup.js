@@ -329,6 +329,7 @@ function renderJob(job) {
   }
 
   if (job.state === 'done' && job.files) {
+    if (job.savedDir) node.append(el('div', 'item-meta', '保存先: ' + job.savedDir));
     for (const f of job.files) {
       node.append(el('div', 'item-meta', f.filename + (f.bytes ? ' · ' + formatBytes(f.bytes) : '')));
     }

@@ -83,6 +83,11 @@ check('全 JS ファイルが構文エラーなし (' + jsFiles.length + ' 件)'
 section('2. background.js の動作（chrome API スタブ）');
 
 const calls = { downloads: [], badges: [], offscreenCreated: 0, dnrRules: [], notifications: [] };
+/** downloadId -> 保存された絶対パス */
+const savedPaths = {};
+// パス区切りはソースにバックスラッシュを直接書かずに組み立てる
+const SEP = String.fromCharCode(92);
+const DOWNLOAD_ROOT = ['C:', 'Users', 'test', 'Downloads', ''].join(SEP);
 let headersListener = null;
 let messageListener = null;
 let tabUpdatedListener = null;
@@ -121,7 +126,14 @@ globalThis.chrome = {
     get: async (id) => ({ id, title: 'タブのタイトル', url: 'https://example.com/watch' }),
   },
   downloads: {
-    download: async (opts) => { calls.downloads.push(opts); return calls.downloads.length; },
+    download: async (opts) => {
+      calls.downloads.push(opts);
+      const id = calls.downloads.length;
+      savedPaths[id] = DOWNLOAD_ROOT + opts.filename.split('/').join(SEP);
+      return id;
+    },
+    // 保存後のファイル名・保存先を引く。実際の Chrome と同じく絶対パスを返す。
+    search: async ({ id }) => (savedPaths[id] ? [{ id, filename: savedPaths[id] }] : []),
   },
   offscreen: {
     createDocument: async () => { calls.offscreenCreated += 1; },
@@ -240,14 +252,22 @@ check('Referer を付与する DNR ルールを追加した',
   calls.dnrRules.some((r) => (r.addRules || []).some((x) => x.action.requestHeaders.some((h) => h.header === 'referer'))));
 check('ダウンロード後に DNR ルールを削除した',
   calls.dnrRules.at(-1).removeRuleIds && !calls.dnrRules.at(-1).addRules);
-check('映像と音声を 2 ファイルとして保存', calls.downloads.length === 2, String(calls.downloads.length));
+check('映像と音声を 2 ファイルとして保存し、.bat を加えて 3 件になる',
+  calls.downloads.length === 3, calls.downloads.map((d) => d.filename).join(' | '));
 check('映像ファイル名に .video を付与',
   calls.downloads[0].filename === 'MediaGrabber/サンプル動画のページ.video.mp4', calls.downloads[0].filename);
 check('音声ファイル名に .audio を付与',
   calls.downloads[1].filename === 'MediaGrabber/サンプル動画のページ.audio.mp4', calls.downloads[1].filename);
 
 const afterJobs = await sendToBackground({ type: 'LIST', tabId: TAB });
-check('ジョブが完了状態になる', afterJobs.jobs.some((j) => j.state === 'done'));
+const doneJob = afterJobs.jobs.find((j) => j.state === 'done');
+check('ジョブが完了状態になる', !!doneJob, JSON.stringify(afterJobs.jobs.map((j) => j.state + ':' + (j.error || ''))));
+check('MP4 化用の .bat も保存する',
+  calls.downloads.length === 3 && calls.downloads[2].filename.endsWith('.結合.bat'),
+  calls.downloads.map((d) => d.filename).join(' | '));
+check('.bat は data URL で渡す', calls.downloads[2].url.startsWith('data:'));
+check('実際の保存先を控える',
+  doneJob && doneJob.savedDir === DOWNLOAD_ROOT + 'MediaGrabber', doneJob && doneJob.savedDir);
 
 // ---------------------------------------------------------------------------
 section('5. エラーと後片付け');

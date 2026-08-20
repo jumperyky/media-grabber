@@ -224,6 +224,16 @@ async function main() {
     const badge = await cdp.evaluate(popup, 'chrome.action.getBadgeText({tabId:' + contentTabId + '})');
     check('ツールバーのバッジに件数が出る', Number(badge) >= 3, String(badge));
 
+    // 保存先の制約を記録しておく。拡張機能からは絶対パスを指定できないため、
+    // N:\Videos\MediaGrabber に保存するには Chrome 側のダウンロード先を変える必要がある。
+    const BS = String.fromCharCode(92);
+    const absPath = 'N:' + BS + 'Videos' + BS + 'MediaGrabber' + BS + 'x.txt';
+    const absResult = await cdp.evaluate(swInfo.sessionId,
+      'chrome.downloads.download({url:"data:text/plain;base64,YQ==", filename:'
+      + JSON.stringify(absPath) + '}).then(() => "OK").catch(e => "ERR:" + e.message)');
+    check('保存先に絶対パスは指定できない（Chrome の制約）',
+      String(absResult).startsWith('ERR:'), String(absResult));
+
     // 再生中の動画からコマを取り出してサムネイルにできているか
     const thumbInfo = await waitFor('サムネイルの生成', async () => {
       const r = await cdp.evaluate(popup, `(() => {
@@ -274,8 +284,9 @@ async function main() {
     const clicked = await cdp.evaluate(popup, clickExpr('HLS'));
     check('HLS 項目のダウンロードボタンを押せた', clicked === 'clicked', String(clicked));
 
+    // .bat も同じ場所に保存されるため、動画ファイルだけを対象にする
     const hlsFile = await waitFor('HLS の保存完了', () => {
-      const files = listFiles(downloadDir).filter((f) => !f.endsWith('.crdownload'));
+      const files = listFiles(downloadDir).filter((f) => /\.ts$/i.test(f));
       return files.length ? files[0] : null;
     }, 90000, 700);
     await waitFor('書き込みの完了', () => fs.statSync(hlsFile).size > 100000, 30000, 400);
@@ -348,6 +359,12 @@ async function main() {
       check('結合結果に映像と音声が揃う', merged.hasVideo && merged.hasAudio, JSON.stringify(merged));
       check('結合結果の長さが 6 秒', Math.abs(merged.duration - 6) < 0.6, String(merged.duration));
     }
+
+    // 削除の指定を渡していないので既定（削除する）が働く
+    check('既定どおり元の映像・音声が片付く',
+      !fs.existsSync(videoPart) && !fs.existsSync(audioPart),
+      [videoPart, audioPart].filter((f) => fs.existsSync(f)).join(', '));
+    check('既定どおり .bat 自身も片付く', !fs.existsSync(mergeBat), mergeBat);
 
     // ---------------------------------------------------------------
     section('6. ジョブの状態を確認する');

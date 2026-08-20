@@ -1,10 +1,14 @@
 // ダウンロードしたファイルを ffmpeg で MP4 にするための Windows バッチファイルを組み立てる。
 // chrome API に依存しないため、Node からそのまま実行してテストできる。
 //
-// 注意: goto / ラベルは使わない。
-// cmd.exe は goto の飛び先をバイト位置で探すため、日本語（マルチバイト）を含む
-// バッチファイルでは文字の途中に着地して行が壊れることがある。
-// そのため分岐は 1 行内で完結させ、打ち切りは exit /b で行う。
+// 注意 1: goto / ラベルは使わない。
+//   cmd.exe は goto の飛び先をバイト位置で探すため、日本語（マルチバイト）を含む
+//   バッチファイルでは文字の途中に着地して行が壊れることがある。
+//   そのため分岐は 1 行内で完結させ、打ち切りは exit /b で行う。
+//
+// 注意 2: 対話で聞く項目はコマンドライン引数でも渡せるようにしてある。
+//   パイプ経由の stdin では set /p が 2 回目以降を読めないため、
+//   自動テストから複数の項目を与えるには引数が必要になる。
 
 /**
  * バッチファイル内に埋め込む文字列を安全にする。
@@ -60,7 +64,7 @@ function askOutputName() {
 }
 
 /**
- * 音ズレの補正値をたずねる。
+ * 音ズレの補正値をたずねる（第 2 引数でも指定可）。
  *
  * 正の値を指定すると音声を遅らせる（音声が先に聞こえるときに使う）。
  * 負の値は音声を早めることになるが、音声側をマイナス方向にずらすと
@@ -94,24 +98,80 @@ function confirmOverwrite() {
   ];
 }
 
-/** 実行して結果を伝える部分。 */
-function runAndReport(command, extraNote) {
+/** ffmpeg を実行し、出力ができたことまで確かめる。 */
+function runFfmpeg(command) {
   return [
     'echo.',
     'echo 処理しています... (再エンコードしないためすぐ終わります)',
     command,
     'if errorlevel 1 ' + bail('失敗しました。上に表示されたメッセージを確認してください。'),
+    // 元ファイルを消す前に、出力が本当にできているかを必ず確認する
+    'if not exist "%OUTPUT%" ' + bail('出力ファイルが作られませんでした。元のファイルはそのまま残します。'),
     'echo.',
     'echo 完了しました: %OUTPUT%',
-    ...(extraNote ? ['echo ' + extraNote] : []),
+    '',
+  ];
+}
+
+/**
+ * 元ファイルを消すかたずねる。既定は削除で、残したいときだけ n を入力する。
+ * 出力ができていることを確認したあとでのみ呼ぶこと。
+ *
+ * @param {string[]} vars 削除対象を保持している変数名（%VIDEO% など）
+ * @param {string} argRef 引数で指定する場合の参照（%~3 など）
+ */
+function askDeleteSources(vars, argRef) {
+  const lines = [
+    'set "DELSRC=' + argRef + '"',
+    'if "%DELSRC%"=="" set /p "DELSRC=元のファイルを削除しますか? (Enter で削除 / n で残す): "',
+    'if "%DELSRC%"=="" set "DELSRC=y"',
+    '',
+  ];
+  for (const name of vars) {
+    lines.push('if /i "%DELSRC%"=="y" if exist "%' + name + '%" del /q "%' + name + '%"');
+  }
+  lines.push(
+    'if /i "%DELSRC%"=="y" echo 元のファイルを削除しました。',
+    'if /i not "%DELSRC%"=="y" echo 元のファイルは残しました。',
+    '',
+  );
+  return lines;
+}
+
+/**
+ * この .bat 自身を消すかたずねる。既定は削除。
+ * 実際の削除は最終行で行う（削除後は以降の行を読めないため）。
+ */
+function askDeleteSelf(argRef) {
+  return [
+    'set "DELSELF=' + argRef + '"',
+    'if "%DELSELF%"=="" set /p "DELSELF=この .bat も削除しますか? (Enter で削除 / n で残す): "',
+    'if "%DELSELF%"=="" set "DELSELF=y"',
+    'if /i "%DELSELF%"=="y" echo この .bat は閉じるときに削除されます。',
+    '',
+  ];
+}
+
+/**
+ * 終了処理。自身の削除は必ず最終行に置く。
+ *
+ * 単に del すると、削除後に cmd が次の行を読もうとして
+ * 「The batch file cannot be found.」を表示してしまう。
+ * ラベルなしの `(goto)` はバッチの実行文脈をその場で打ち切るため、これを防げる。
+ * ラベルを持たないので、goto 本来のバイト位置探索（日本語行が壊れる原因）は起きない。
+ */
+function finish() {
+  return [
     'echo.',
     'pause',
+    'if /i "%DELSELF%"=="y" ((goto) 2>nul & del /q "%~f0")',
   ];
 }
 
 /**
  * 映像と音声が別ファイルになった場合の、結合用バッチファイル。
  * 再エンコードしないため画質・音質は劣化しない。
+ * 引数: %1 保存名 / %2 音ズレ補正 / %3 元ファイル削除 / %4 自身の削除
  */
 export function buildMergeBat({ videoFile, audioFile, outputFile }) {
   return join([
@@ -135,10 +195,12 @@ export function buildMergeBat({ videoFile, audioFile, outputFile }) {
     ...askOutputName(),
     ...askOffset(),
     ...confirmOverwrite(),
-    ...runAndReport(
-      'ffmpeg -hide_banner -loglevel error -y %OFFV% -i "%VIDEO%" %OFFA% -i "%AUDIO%" -c copy "%OUTPUT%"',
-      'ズレが残る場合は、もう一度実行して補正値を変えてください。',
-    ),
+    ...runFfmpeg('ffmpeg -hide_banner -loglevel error -y %OFFV% -i "%VIDEO%" %OFFA% -i "%AUDIO%" -c copy "%OUTPUT%"'),
+    'echo ズレが残る場合は、元のファイルを残したうえで補正値を変えて実行し直してください。',
+    'echo.',
+    ...askDeleteSources(['VIDEO', 'AUDIO'], '%~3'),
+    ...askDeleteSelf('%~4'),
+    ...finish(),
   ]);
 }
 
@@ -146,6 +208,7 @@ export function buildMergeBat({ videoFile, audioFile, outputFile }) {
  * 1 本の .ts などを MP4 に変換するバッチファイル。
  * こちらも入れ物を作り直すだけで、再エンコードはしない。
  * 映像と音声が同じファイルに入っているため、音ズレ補正は用意しない。
+ * 引数: %1 保存名 / %2 元ファイル削除 / %3 自身の削除
  */
 export function buildConvertBat({ inputFile, outputFile }) {
   return join([
@@ -165,7 +228,10 @@ export function buildConvertBat({ inputFile, outputFile }) {
     ...requireFfmpeg(),
     ...askOutputName(),
     ...confirmOverwrite(),
-    ...runAndReport('ffmpeg -hide_banner -loglevel error -y -i "%INPUT%" -c copy "%OUTPUT%"'),
+    ...runFfmpeg('ffmpeg -hide_banner -loglevel error -y -i "%INPUT%" -c copy "%OUTPUT%"'),
+    ...askDeleteSources(['INPUT'], '%~2'),
+    ...askDeleteSelf('%~3'),
+    ...finish(),
   ]);
 }
 

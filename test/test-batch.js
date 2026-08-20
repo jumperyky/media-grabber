@@ -10,9 +10,12 @@ import { buildMergeBat, buildConvertBat, mp4NameFor, escapeForBatch } from '../e
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.join(here, 'fixtures');
+const sample = path.join(fixtures, 'direct', 'sample.mp4');
+const CRLF = String.fromCharCode(13, 10);
 
 let passed = 0;
 let failed = 0;
+const tempDirs = [];
 
 function check(name, condition, detail) {
   if (condition) { passed += 1; console.log('  PASS  ' + name); }
@@ -40,20 +43,26 @@ function avOffset(file) {
   return Number(a.start_time) - Number(v.start_time);
 }
 
-/** .bat を UTF-8（BOM なし）で書き出して実行する。stdin で set /p に答える。 */
-function runBat(dir, batName, content, answers, args = []) {
+/** 映像のみ / 音声のみの .ts を用意した作業用ディレクトリを作る。 */
+function freshDir(videoName = 'テスト動画.video.ts', audioName = 'テスト動画.audio.ts') {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+  tempDirs.push(dir);
+  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-map', '0:v', '-c', 'copy', '-f', 'mpegts', path.join(dir, videoName)]);
+  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-map', '0:a', '-c', 'copy', '-f', 'mpegts', path.join(dir, audioName)]);
+  return dir;
+}
+
+/**
+ * .bat を UTF-8（BOM なし）で書き出して実行する。
+ * 対話項目は引数で渡す。パイプ経由の stdin では set /p が 2 回目以降を読めないため、
+ * stdin で答えられるのは最初の 1 つだけ。
+ */
+function runBat(dir, batName, content, answers = [], args = []) {
   const batPath = path.join(dir, batName);
   fs.writeFileSync(batPath, content, { encoding: 'utf8' });
-  // パイプ経由の stdin では set /p が 2 回目以降を読めないため、
-  // 対話で聞く項目は引数でも渡せるようにしてある（手で実行する場合は入力で動く）。
-  const CRLF = String.fromCharCode(13, 10);
   const stdin = answers.map((a) => a + CRLF).join('');
   try {
-    const stdout = execFileSync('cmd.exe', ['/c', batPath, ...args], {
-      cwd: dir,
-      input: stdin,
-      timeout: 60000,
-    });
+    const stdout = execFileSync('cmd.exe', ['/c', batPath, ...args], { cwd: dir, input: stdin, timeout: 60000 });
     return { ok: true, output: stdout.toString('utf8') };
   } catch (err) {
     return {
@@ -64,149 +73,215 @@ function runBat(dir, batName, content, answers, args = []) {
   }
 }
 
-const work = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+/** 解析エラー（行の破損）が起きていないか。 */
+function noParseError(output) {
+  return !output.includes('not recognized') && !output.includes('認識されて');
+}
+
+const mergeBat = buildMergeBat({
+  videoFile: 'テスト動画.video.ts',
+  audioFile: 'テスト動画.audio.ts',
+  outputFile: 'テスト動画.mp4',
+});
 
 try {
   // ---------------------------------------------------------------
   section('1. 生成される中身');
-
-  const merge = buildMergeBat({
-    videoFile: 'サンプル動画.video.ts',
-    audioFile: 'サンプル動画.audio.ts',
-    outputFile: 'サンプル動画.mp4',
-  });
-
-  check('CRLF 改行で書き出す', merge.includes('\r\n') && !/[^\r]\n/.test(merge));
-  check('文字化け対策の chcp がある', merge.includes('chcp 65001'));
-  check('置き場所に依存しないよう cd している', merge.includes('cd /d "%~dp0"'));
-  check('再エンコードしない (-c copy)', merge.includes('-c copy'));
-  check('ffmpeg の有無を先に調べる', merge.includes('where ffmpeg'));
-  check('保存名を入力できる', merge.includes('set /p "NEWNAME='));
-  check('拡張子が無ければ .mp4 を補う', merge.includes('"%OUTPUT:~-4%"==".mp4"'));
-  check('閉じないよう pause で終わる', merge.trimEnd().endsWith('pause'));
-  check('goto を使わない（日本語入りだと飛び先がずれるため）', !/goto/.test(merge));
-  check('遅延展開を使わない（! を含む名前で壊れないため）', !merge.includes('enabledelayedexpansion'));
-  check('音ズレ補正を入力できる', merge.includes('set /p "OFFSET='));
+  check('CRLF 改行で書き出す', mergeBat.includes(CRLF) && !/[^\r]\n/.test(mergeBat));
+  check('文字化け対策の chcp がある', mergeBat.includes('chcp 65001'));
+  check('置き場所に依存しないよう cd している', mergeBat.includes('cd /d "%~dp0"'));
+  check('再エンコードしない (-c copy)', mergeBat.includes('-c copy'));
+  check('ffmpeg の有無を先に調べる', mergeBat.includes('where ffmpeg'));
+  check('保存名を入力できる', mergeBat.includes('set /p "NEWNAME='));
+  check('音ズレ補正を入力できる', mergeBat.includes('set /p "OFFSET='));
+  check('補正は -itsoffset で行う', mergeBat.includes('-itsoffset'));
+  check('負の補正は映像側をずらす', mergeBat.includes('if "%OFFSET:~0,1%"=="-" set "OFFV=-itsoffset %OFFSET:~1%"'));
+  check('元ファイルの削除を確認する', mergeBat.includes('set /p "DELSRC='));
+  check('自身の削除を確認する', mergeBat.includes('set /p "DELSELF='));
+  check('削除の既定は「削除する」', mergeBat.includes('if "%DELSRC%"=="" set "DELSRC=y"')
+    && mergeBat.includes('if "%DELSELF%"=="" set "DELSELF=y"'));
+  check('出力ができたことを確かめてから削除に進む', mergeBat.includes('if not exist "%OUTPUT%" (echo.&echo 出力ファイルが作られませんでした'));
+  check('自身の削除は最終行で行う',
+    mergeBat.trimEnd().endsWith('if /i "%DELSELF%"=="y" ((goto) 2>nul & del /q "%~f0")'));
+  check('拡張子が無ければ .mp4 を補う', mergeBat.includes('"%OUTPUT:~-4%"==".mp4"'));
+  check('ラベル付きの goto を使わない（日本語入りだと飛び先がずれるため）',
+    !/goto\s+\S/.test(mergeBat), (mergeBat.match(/goto\s+\S+/g) || []).join(', '));
+  check('遅延展開を使わない（! を含む名前で壊れないため）', !mergeBat.includes('enabledelayedexpansion'));
   check('echo 行にリダイレクト記号が混ざらない',
-    merge.split(String.fromCharCode(13, 10)).filter((l) => l.startsWith('echo ') && /[<>|]/.test(l)).length === 0,
-    merge.split(String.fromCharCode(13, 10)).filter((l) => l.startsWith('echo ') && /[<>|]/.test(l)).join(' | '));
-  check('補正は -itsoffset で行う', merge.includes('-itsoffset'));
-  check('保存名と補正値は引数でも渡せる',
-    merge.includes('set "NEWNAME=%~1"') && merge.includes('set "OFFSET=%~2"'));
-  check('負の補正は映像側をずらす', merge.includes('if "%OFFSET:~0,1%"=="-" set "OFFV=-itsoffset %OFFSET:~1%"'));
+    mergeBat.split(CRLF).filter((l) => l.startsWith('echo ') && /[<>|]/.test(l)).length === 0);
+  check('各項目は引数でも渡せる',
+    mergeBat.includes('set "NEWNAME=%~1"') && mergeBat.includes('set "OFFSET=%~2"')
+    && mergeBat.includes('set "DELSRC=%~3"') && mergeBat.includes('set "DELSELF=%~4"'));
 
   check('% を含む名前をエスケープする', escapeForBatch('100%達成.ts') === '100%%達成.ts');
-  check('出力名は .video を外して .mp4 にする', mp4NameFor('動画.video.ts') === '動画.mp4', mp4NameFor('動画.video.ts'));
-  check('.ts 単体からも .mp4 名を作れる', mp4NameFor('動画.ts') === '動画.mp4', mp4NameFor('動画.ts'));
+  check('出力名は .video を外して .mp4 にする', mp4NameFor('動画.video.ts') === '動画.mp4');
+  check('.ts 単体からも .mp4 名を作れる', mp4NameFor('動画.ts') === '動画.mp4');
 
   // ---------------------------------------------------------------
-  section('2. 素材の用意');
-  const sample = path.join(fixtures, 'direct', 'sample.mp4');
-  const videoOnly = path.join(work, 'テスト動画.video.ts');
-  const audioOnly = path.join(work, 'テスト動画.audio.ts');
-  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-map', '0:v', '-c', 'copy', '-f', 'mpegts', videoOnly]);
-  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-map', '0:a', '-c', 'copy', '-f', 'mpegts', audioOnly]);
+  section('2. 既定の名前で結合する（元ファイルは残す）');
+  {
+    const dir = freshDir();
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, [''], ['', '0', 'n', 'n']);
+    check('エラーにならず終了する', r.ok, r.output);
+    check('解析エラーが起きない', noParseError(r.output), r.output.slice(0, 200));
 
-  const vInfo = probeFile(videoOnly);
-  const aInfo = probeFile(audioOnly);
-  check('映像のみの .ts を用意（音声なし）', vInfo.hasVideo && !vInfo.hasAudio);
-  check('音声のみの .ts を用意（映像なし）', aInfo.hasAudio && !aInfo.hasVideo);
-
-  // ---------------------------------------------------------------
-  section('3. 結合用 .bat をそのまま実行（Enter で既定の名前）');
-  const mergeBat = buildMergeBat({
-    videoFile: 'テスト動画.video.ts',
-    audioFile: 'テスト動画.audio.ts',
-    outputFile: 'テスト動画.mp4',
-  });
-  const r1 = runBat(work, 'テスト動画.結合.bat', mergeBat, ['', '']);
-  check('エラーにならず終了する', r1.ok, r1.output);
-
-  const defaultOut = path.join(work, 'テスト動画.mp4');
-  check('既定の名前で MP4 ができる', fs.existsSync(defaultOut), r1.output);
-  if (fs.existsSync(defaultOut)) {
-    const info = probeFile(defaultOut);
-    check('MP4 コンテナになっている', info.format.includes('mp4'), info.format);
-    check('映像と音声が両方入っている', info.hasVideo && info.hasAudio, JSON.stringify(info));
-    check('長さが元と同じ 6 秒', Math.abs(info.duration - 6) < 0.6, String(info.duration));
-    check('補正なしなら映像と音声が揃う', Math.abs(avOffset(defaultOut)) < 0.01, String(avOffset(defaultOut)));
-  }
-  check('日本語のファイル名が文字化けしない', !r1.output.includes('見つかりません'), r1.output.slice(0, 200));
-  check('解析エラー（行の破損）が起きない',
-    !r1.output.includes('not recognized') && !r1.output.includes('認識されて'),
-    r1.output.split(String.fromCharCode(10)).filter((l) => l.includes('recognized') || l.includes('認識')).join(' | '));
-
-  // ---------------------------------------------------------------
-  section('4. 保存名を入力して実行');
-  const renamed = 'VIVANT_第14話';
-  const r2 = runBat(work, 'テスト動画.結合2.bat', mergeBat, [renamed, '']);
-  check('エラーにならず終了する', r2.ok, r2.output);
-  const renamedOut = path.join(work, renamed + '.mp4');
-  check('入力した名前で保存される（.mp4 は自動で付く）', fs.existsSync(renamedOut),
-    fs.readdirSync(work).join(', '));
-  if (fs.existsSync(renamedOut)) {
-    const info = probeFile(renamedOut);
-    check('中身は正しく結合されている', info.hasVideo && info.hasAudio, JSON.stringify(info));
+    const out = path.join(dir, 'テスト動画.mp4');
+    check('既定の名前で MP4 ができる', fs.existsSync(out), fs.readdirSync(dir).join(', '));
+    if (fs.existsSync(out)) {
+      const info = probeFile(out);
+      check('MP4 コンテナになっている', info.format.includes('mp4'), info.format);
+      check('映像と音声が両方入っている', info.hasVideo && info.hasAudio, JSON.stringify(info));
+      check('長さが元と同じ 6 秒', Math.abs(info.duration - 6) < 0.6, String(info.duration));
+      check('補正なしなら映像と音声が揃う', Math.abs(avOffset(out)) < 0.01, String(avOffset(out)));
+    }
+    check('n を指定したので元ファイルが残る',
+      fs.existsSync(path.join(dir, 'テスト動画.video.ts')) && fs.existsSync(path.join(dir, 'テスト動画.audio.ts')));
+    check('n を指定したので .bat も残る', fs.existsSync(path.join(dir, 'テスト動画.結合.bat')));
   }
 
   // ---------------------------------------------------------------
-  section('5. 上書き確認');
-  const r3 = runBat(work, 'テスト動画.結合3.bat', mergeBat, ['', '', 'n']);
-  check('既存ファイルがあるとき、n で中止する',
-    r3.output.includes('中止しました'), r3.output.slice(-200));
+  section('3. 保存名を入力して結合する');
+  {
+    const dir = freshDir();
+    const renamed = 'VIVANT_第14話';
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, [renamed], ['', '0', 'n', 'n']);
+    check('エラーにならず終了する', r.ok, r.output);
+    const out = path.join(dir, renamed + '.mp4');
+    check('入力した名前で保存される（.mp4 は自動で付く）', fs.existsSync(out), fs.readdirSync(dir).join(', '));
+    if (fs.existsSync(out)) {
+      const info = probeFile(out);
+      check('中身は正しく結合されている', info.hasVideo && info.hasAudio, JSON.stringify(info));
+    }
+  }
 
   // ---------------------------------------------------------------
-  section('6. 音ズレ補正');
+  section('4. 上書き確認');
+  {
+    const dir = freshDir();
+    fs.writeFileSync(path.join(dir, 'dup.mp4'), 'dummy');
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, ['n'], ['dup', '0', 'n', 'n']);
+    check('既存ファイルがあるとき n で中止する', r.output.includes('中止しました'), r.output.slice(-200));
+    check('中止したので元のファイルは残る', fs.readFileSync(path.join(dir, 'dup.mp4'), 'utf8') === 'dummy');
+  }
+
+  // ---------------------------------------------------------------
+  section('5. 音ズレ補正');
   for (const [label, answer, expected] of [
     ['音声を遅らせる', '0.2', 0.2],
     ['音声を早める', '-0.15', -0.15],
   ]) {
-    // 引数はコマンドラインのコードページを通るため、この検証では ASCII 名を使う
-    // （手入力の場合は日本語の名前でも問題なく、それは 4. で確認している）
+    const dir = freshDir();
+    // 引数はコマンドラインのコードページを通るため、ここでは ASCII 名を使う
+    // （日本語名での入力は 3. で確認している）
     const name = 'sync' + answer.replace('.', '_').replace('-', 'minus');
-    const r = runBat(work, name + '.bat', mergeBat, [], [name, answer]);
-    const outFile = path.join(work, name + '.mp4');
-    check(label + ': 生成される', fs.existsSync(outFile), r.output.slice(-200));
-    if (fs.existsSync(outFile)) {
-      const actual = avOffset(outFile);
-      check(label + ': 指定どおりの補正がかかる (' + expected + '秒)',
-        Math.abs(actual - expected) < 0.01, String(actual));
-      const info = probeFile(outFile);
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, [], [name, answer, 'n', 'n']);
+    const out = path.join(dir, name + '.mp4');
+    check(label + ': 生成される', fs.existsSync(out), r.output.slice(-200));
+    if (fs.existsSync(out)) {
+      const actual = avOffset(out);
+      check(label + ': 指定どおりの補正がかかる (' + expected + '秒)', Math.abs(actual - expected) < 0.01, String(actual));
+      const info = probeFile(out);
       check(label + ': 映像と音声が両方残る', info.hasVideo && info.hasAudio, JSON.stringify(info));
     }
   }
 
   // ---------------------------------------------------------------
-  section('7. .ts 単体の変換用 .bat');
-  const single = path.join(work, '単体動画.ts');
-  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-c', 'copy', '-f', 'mpegts', single]);
-
-  const convertBat = buildConvertBat({ inputFile: '単体動画.ts', outputFile: '単体動画.mp4' });
-  const r4 = runBat(work, '単体動画.変換.bat', convertBat, ['']);
-  check('エラーにならず終了する', r4.ok, r4.output);
-
-  const convertedOut = path.join(work, '単体動画.mp4');
-  check('MP4 ができる', fs.existsSync(convertedOut), fs.readdirSync(work).join(', '));
-  if (fs.existsSync(convertedOut)) {
-    const info = probeFile(convertedOut);
-    check('MP4 コンテナになっている', info.format.includes('mp4'), info.format);
-    check('映像と音声が保持される', info.hasVideo && info.hasAudio, JSON.stringify(info));
-    check('長さが変わらない', Math.abs(info.duration - 6) < 0.6, String(info.duration));
+  section('6. 元ファイルの削除');
+  {
+    const dir = freshDir();
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, [], ['merged', '0', 'y', 'n']);
+    check('エラーにならず終了する', r.ok, r.output);
+    check('MP4 はできている', fs.existsSync(path.join(dir, 'merged.mp4')), fs.readdirSync(dir).join(', '));
+    check('映像の元ファイルが削除される', !fs.existsSync(path.join(dir, 'テスト動画.video.ts')));
+    check('音声の元ファイルが削除される', !fs.existsSync(path.join(dir, 'テスト動画.audio.ts')));
+    check('削除した旨を表示する', r.output.includes('元のファイルを削除しました'), r.output.slice(-300));
+  }
+  {
+    const dir = freshDir();
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, [], ['merged', '0', 'n', 'n']);
+    check('n を指定すると元ファイルは残る',
+      fs.existsSync(path.join(dir, 'テスト動画.video.ts')) && fs.existsSync(path.join(dir, 'テスト動画.audio.ts')));
+    check('残した旨を表示する', r.output.includes('元のファイルは残しました'), r.output.slice(-300));
   }
 
   // ---------------------------------------------------------------
-  section('8. 元ファイルが無い場合');
-  const orphan = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-empty-'));
-  const r5 = runBat(orphan, 'テスト動画.結合.bat', mergeBat, ['', '']);
-  check('見つからない旨を伝えて終わる', r5.output.includes('見つかりません'), r5.output.slice(0, 200));
-  check('MP4 は作られない', !fs.existsSync(path.join(orphan, 'テスト動画.mp4')));
-  fs.rmSync(orphan, { recursive: true, force: true });
+  section('7. .bat 自身の削除');
+  {
+    const dir = freshDir();
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, [], ['merged', '0', 'n', 'y']);
+    check('y を指定すると .bat が消える', !fs.existsSync(path.join(dir, 'テスト動画.結合.bat')),
+      fs.readdirSync(dir).join(', '));
+    check('MP4 は残る', fs.existsSync(path.join(dir, 'merged.mp4')));
+    check('削除後に余計なエラーを出さない',
+      !r.output.includes('cannot be found') && !r.output.includes('見つかりません'), r.output.slice(-200));
+  }
+  {
+    const dir = freshDir();
+    runBat(dir, 'テスト動画.結合.bat', mergeBat, [], ['merged', '0', 'n', 'n']);
+    check('n を指定すると .bat は残る', fs.existsSync(path.join(dir, 'テスト動画.結合.bat')));
+  }
+  {
+    // 元ファイルと .bat の両方を消す = 既定の動作
+    const dir = freshDir();
+    runBat(dir, 'テスト動画.結合.bat', mergeBat, [], ['merged', '0', 'y', 'y']);
+    const left = fs.readdirSync(dir);
+    check('既定どおり両方消すと MP4 だけが残る',
+      left.length === 1 && left[0] === 'merged.mp4', left.join(', '));
+  }
+
+  // ---------------------------------------------------------------
+  section('8. .ts 単体の変換用 .bat');
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+    tempDirs.push(dir);
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-c', 'copy', '-f', 'mpegts', path.join(dir, '単体動画.ts')]);
+    const convertBat = buildConvertBat({ inputFile: '単体動画.ts', outputFile: '単体動画.mp4' });
+
+    check('引数は 保存名 / 元削除 / 自身削除 の順',
+      convertBat.includes('set "NEWNAME=%~1"') && convertBat.includes('set "DELSRC=%~2"')
+      && convertBat.includes('set "DELSELF=%~3"'));
+    check('音ズレ補正は用意しない（多重化済みのため）', !convertBat.includes('OFFSET'));
+
+    const r = runBat(dir, '単体動画.変換.bat', convertBat, [], ['', 'n', 'n']);
+    check('エラーにならず終了する', r.ok, r.output);
+    check('解析エラーが起きない', noParseError(r.output), r.output.slice(0, 200));
+
+    const out = path.join(dir, '単体動画.mp4');
+    check('MP4 ができる', fs.existsSync(out), fs.readdirSync(dir).join(', '));
+    if (fs.existsSync(out)) {
+      const info = probeFile(out);
+      check('MP4 コンテナになっている', info.format.includes('mp4'), info.format);
+      check('映像と音声が保持される', info.hasVideo && info.hasAudio, JSON.stringify(info));
+      check('長さが変わらない', Math.abs(info.duration - 6) < 0.6, String(info.duration));
+    }
+    check('n を指定したので .ts は残る', fs.existsSync(path.join(dir, '単体動画.ts')));
+
+    // 既定どおり両方消す
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+    tempDirs.push(dir2);
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-c', 'copy', '-f', 'mpegts', path.join(dir2, '単体動画.ts')]);
+    runBat(dir2, '単体動画.変換.bat', convertBat, [], ['', 'y', 'y']);
+    const left = fs.readdirSync(dir2);
+    check('既定どおり両方消すと MP4 だけが残る',
+      left.length === 1 && left[0] === '単体動画.mp4', left.join(', '));
+  }
+
+  // ---------------------------------------------------------------
+  section('9. 元ファイルが無い場合');
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+    tempDirs.push(dir);
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, [], ['', '0', 'y', 'y']);
+    check('見つからない旨を伝えて終わる', r.output.includes('見つかりません'), r.output.slice(0, 200));
+    check('MP4 は作られない', !fs.existsSync(path.join(dir, 'テスト動画.mp4')));
+    check('失敗したときは .bat を消さない', fs.existsSync(path.join(dir, 'テスト動画.結合.bat')));
+  }
 
   console.log('\n===================================');
   console.log('  成功 ' + passed + ' / 失敗 ' + failed);
   console.log('===================================');
 } finally {
-  fs.rmSync(work, { recursive: true, force: true });
+  for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true });
 }
 
 process.exit(failed === 0 ? 0 : 1);

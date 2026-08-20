@@ -22,6 +22,12 @@
         <span>保存先サブフォルダ</span>
         <input type="text" id="subfolder" placeholder="MediaGrabber" />
       </label>
+      <p class="settings-note">
+        保存先は「Chrome のダウンロード フォルダー + ここで指定したサブフォルダ」になります。
+        拡張機能から絶対パスは指定できないため、例えば <code>N:\Videos\MediaGrabber</code>
+        に保存したい場合は、Chrome の設定 (chrome://settings/downloads) でダウンロード先を
+        <code>N:\Videos</code> にしてください。
+      </p>
       <label>
         <span>同時ダウンロード数</span>
         <input type="number" id="concurrency" min="1" max="16" />

@@ -263,17 +263,32 @@ async function downloadStreamJob(jobId, item, settings, variantIndex) {
 }
 
 /**
- * 保存された実際のファイル名を取得する。
+ * 保存された実際のファイルの絶対パスを取得する。
  * 同名ファイルがあると Chrome が「(1)」を付けるため、その結果を見てから .bat を作る。
  */
-async function resolveSavedName(downloadId, timeoutMs = 8000) {
+async function resolveSavedPath(downloadId, timeoutMs = 8000) {
   const startedAt = Date.now();
   for (;;) {
     const [entry] = await chrome.downloads.search({ id: downloadId });
-    if (entry && entry.filename) return entry.filename.split(/[\\/]/).pop();
+    if (entry && entry.filename) return entry.filename;
     if (Date.now() - startedAt > timeoutMs) return null;
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
+}
+
+/** 保存された実際のファイル名（フォルダーを除く）。 */
+async function resolveSavedName(downloadId) {
+  const full = await resolveSavedPath(downloadId);
+  return full ? full.split(/[\\/]/).pop() : null;
+}
+
+/** 保存先フォルダーの絶対パス。設定した場所と食い違っていないか確認するために表示する。 */
+async function resolveSavedDir(downloadId) {
+  const full = await resolveSavedPath(downloadId);
+  if (!full) return null;
+  const parts = full.split(/[\\/]/);
+  parts.pop();
+  return parts.join('\\');
 }
 
 /** テキストを chrome.downloads で保存できる data URL にする。 */
@@ -351,13 +366,15 @@ async function startDownload({ tabId, itemId, variantIndex }) {
 
   (async () => {
     try {
+      let files;
       if (item.kind === 'direct') {
-        const r = await downloadDirect(enriched, settings);
-        setJob(jobId, { state: 'done', files: [r], handedToBrowser: true });
+        files = [await downloadDirect(enriched, settings)];
       } else {
-        const files = await downloadStreamJob(jobId, enriched, settings, variantIndex);
-        setJob(jobId, { state: 'done', files });
+        files = await downloadStreamJob(jobId, enriched, settings, variantIndex);
       }
+      // 実際の保存先を控えて、設定した場所と食い違っていないか確認できるようにする
+      const savedDir = files.length ? await resolveSavedDir(files[0].downloadId) : null;
+      setJob(jobId, { state: 'done', files, savedDir });
     } catch (err) {
       await clearRefererRule(jobId);
       setJob(jobId, { state: 'error', error: err?.message || String(err) });
