@@ -277,6 +277,47 @@ try {
     check('失敗したときは .bat を消さない', fs.existsSync(path.join(dir, 'テスト動画.結合.bat')));
   }
 
+  // ---------------------------------------------------------------
+  section('10. 保存後にファイル名を変更した場合');
+  {
+    // 映像・音声・.bat をまとめて別の名前に変えた（.bat の名前から辿れる）
+    const dir = freshDir('新しい名前.video.ts', '新しい名前.audio.ts');
+    const r = runBat(dir, '新しい名前.結合.bat', mergeBat, [''], ['', '0', 'n', 'n']);
+    check('結合: 変更後の名前で元ファイルを見つける', r.ok && !r.output.includes('見つかりません'),
+      r.output.slice(-300));
+    check('結合: 変更後の名前で MP4 ができる', fs.existsSync(path.join(dir, '新しい名前.mp4')),
+      fs.readdirSync(dir).join(', '));
+  }
+  {
+    // .bat の名前だけでは辿れない場合は、共通部分の入力で解決できる
+    const dir = freshDir('renamed-only.video.ts', 'renamed-only.audio.ts');
+    const r = runBat(dir, 'テスト動画.結合.bat', mergeBat, ['renamed-only'], ['', '0', 'n', 'n']);
+    check('結合: 共通部分を入力すれば解決できる', fs.existsSync(path.join(dir, 'renamed-only.mp4')),
+      fs.readdirSync(dir).join(', ') + ' / ' + r.output.slice(-200));
+  }
+  {
+    // 変換用も同様に、.bat の名前から辿れる
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+    tempDirs.push(dir);
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-c', 'copy', '-f', 'mpegts', path.join(dir, '別の名前.ts')]);
+    const convertBat = buildConvertBat({ inputFile: '単体動画.ts', outputFile: '単体動画.mp4' });
+    const r = runBat(dir, '別の名前.変換.bat', convertBat, [''], ['', 'n', 'n']);
+    check('変換: 変更後の名前で変換元を見つける', r.ok && !r.output.includes('見つかりません'),
+      r.output.slice(-300));
+    check('変換: 変更後の名前で MP4 ができる', fs.existsSync(path.join(dir, '別の名前.mp4')),
+      fs.readdirSync(dir).join(', '));
+  }
+  {
+    // 動画だけ名前を変えて .bat は元のままの場合は、名前の入力で解決できる
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+    tempDirs.push(dir);
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-c', 'copy', '-f', 'mpegts', path.join(dir, 'renamed-single.ts')]);
+    const convertBat = buildConvertBat({ inputFile: '単体動画.ts', outputFile: '単体動画.mp4' });
+    const r = runBat(dir, '単体動画.変換.bat', convertBat, ['renamed-single'], ['', 'n', 'n']);
+    check('変換: 名前を入力すれば解決できる', fs.existsSync(path.join(dir, 'renamed-single.mp4')),
+      fs.readdirSync(dir).join(', ') + ' / ' + r.output.slice(-200));
+  }
+
   console.log('\n===================================');
   console.log('  成功 ' + passed + ' / 失敗 ' + failed);
   console.log('===================================');

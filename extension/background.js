@@ -271,6 +271,8 @@ async function resolveSavedPath(downloadId, timeoutMs = 8000) {
   for (;;) {
     const [entry] = await chrome.downloads.search({ id: downloadId });
     if (entry && entry.filename) return entry.filename;
+    // 保存ダイアログを閉じた（取り消した）場合はいくら待っても決まらない
+    if (entry && entry.state === 'interrupted') return null;
     if (Date.now() - startedAt > timeoutMs) return null;
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
@@ -307,17 +309,21 @@ async function saveHelperBat(files, settings) {
   const video = files.find((f) => f.role === 'video');
   const audio = files.find((f) => f.role === 'audio');
 
+  // 保存ダイアログを出す設定のときは、利用者が名前を入力し終えるまで待つ必要がある。
+  // ここで待ち切れないと、.bat の中身が入力前の名前のままになってしまう。
+  const wait = settings.saveAs ? 10 * 60 * 1000 : 8000;
+
   let content = null;
   let batName = null;
 
   if (video && audio) {
-    const videoName = await resolveSavedName(video.downloadId) || video.filename.split('/').pop();
-    const audioName = await resolveSavedName(audio.downloadId) || audio.filename.split('/').pop();
+    const videoName = await resolveSavedName(video.downloadId, wait) || video.filename.split('/').pop();
+    const audioName = await resolveSavedName(audio.downloadId, wait) || audio.filename.split('/').pop();
     const outputName = mp4NameFor(videoName);
     content = buildMergeBat({ videoFile: videoName, audioFile: audioName, outputFile: outputName });
     batName = mp4NameFor(videoName).replace(/\.mp4$/i, '') + '.結合.bat';
   } else if (video && /\.ts$/i.test(video.filename)) {
-    const inputName = await resolveSavedName(video.downloadId) || video.filename.split('/').pop();
+    const inputName = await resolveSavedName(video.downloadId, wait) || video.filename.split('/').pop();
     const outputName = mp4NameFor(inputName);
     content = buildConvertBat({ inputFile: inputName, outputFile: outputName });
     batName = mp4NameFor(inputName).replace(/\.mp4$/i, '') + '.変換.bat';

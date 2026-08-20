@@ -1,7 +1,7 @@
 // ダウンロードしたファイルを ffmpeg で MP4 にするための Windows バッチファイルを組み立てる。
 // chrome API に依存しないため、Node からそのまま実行してテストできる。
 //
-// 注意 1: goto / ラベルは使わない。
+// 注意 1: ラベル付きの goto は使わない。
 //   cmd.exe は goto の飛び先をバイト位置で探すため、日本語（マルチバイト）を含む
 //   バッチファイルでは文字の途中に着地して行が壊れることがある。
 //   そのため分岐は 1 行内で完結させ、打ち切りは exit /b で行う。
@@ -9,6 +9,10 @@
 // 注意 2: 対話で聞く項目はコマンドライン引数でも渡せるようにしてある。
 //   パイプ経由の stdin では set /p が 2 回目以降を読めないため、
 //   自動テストから複数の項目を与えるには引数が必要になる。
+//
+// 注意 3: 元ファイルの名前は決め打ちにしない。
+//   保存後にファイル名を変更することがあるため、決め打ちの名前が見つからない場合は
+//   この .bat 自身の名前から探し、それでも見つからなければ入力を求める。
 
 /**
  * バッチファイル内に埋め込む文字列を安全にする。
@@ -38,6 +42,41 @@ function header(title) {
     'title ' + title,
     '',
   ];
+}
+
+/**
+ * この .bat の名前から、元ファイルの共通部分を割り出す。
+ * 「動画.変換.bat」なら %~n0 が「動画.変換」なので、さらに拡張子を落として「動画」を得る。
+ * ファイル名を変更した場合は .bat も同じ名前に変えれば、これで対応が付く。
+ */
+function deriveBase() {
+  return [
+    'for %%A in ("%~n0") do set "BASE=%%~nA"',
+    '',
+  ];
+}
+
+/** 結合用: BASE から映像・音声を探す。見つかっているものは触らない。 */
+function findMergeSources() {
+  const lines = [];
+  for (const [role, varName] of [['video', 'VIDEO'], ['audio', 'AUDIO']]) {
+    for (const ext of ['ts', 'mp4', 'webm', 'mkv']) {
+      lines.push('if not exist "%' + varName + '%" if exist "%BASE%.' + role + '.' + ext
+        + '" set "' + varName + '=%BASE%.' + role + '.' + ext + '"');
+    }
+  }
+  lines.push('');
+  return lines;
+}
+
+/** 変換用: BASE から変換元を探す。.mp4 は出力と紛らわしいので最後に試す。 */
+function findConvertSource() {
+  const lines = [];
+  for (const ext of ['ts', 'webm', 'mkv', 'm4v', 'mp4']) {
+    lines.push('if not exist "%INPUT%" if exist "%BASE%.' + ext + '" set "INPUT=%BASE%.' + ext + '"');
+  }
+  lines.push('');
+  return lines;
 }
 
 /** ffmpeg の有無を調べる。無ければその場で終了する。 */
@@ -116,9 +155,6 @@ function runFfmpeg(command) {
 /**
  * 元ファイルを消すかたずねる。既定は削除で、残したいときだけ n を入力する。
  * 出力ができていることを確認したあとでのみ呼ぶこと。
- *
- * @param {string[]} vars 削除対象を保持している変数名（%VIDEO% など）
- * @param {string} argRef 引数で指定する場合の参照（%~3 など）
  */
 function askDeleteSources(vars, argRef) {
   const lines = [
@@ -176,20 +212,35 @@ function finish() {
 export function buildMergeBat({ videoFile, audioFile, outputFile }) {
   return join([
     ...header('映像と音声を結合して MP4 にする'),
-    'set "VIDEO=' + escapeForBatch(videoFile) + '"',
-    'set "AUDIO=' + escapeForBatch(audioFile) + '"',
-    'set "OUTPUT=' + escapeForBatch(outputFile) + '"',
-    '',
     'echo ------------------------------------------------',
     'echo  映像と音声を結合して MP4 にします',
     'echo ------------------------------------------------',
+    '',
+    // 保存時の名前をまず試す
+    'set "VIDEO=' + escapeForBatch(videoFile) + '"',
+    'set "AUDIO=' + escapeForBatch(audioFile) + '"',
+    'if not exist "%VIDEO%" set "VIDEO="',
+    'if not exist "%AUDIO%" set "AUDIO="',
+    '',
+    // 見つからなければ、この .bat の名前から探す
+    ...deriveBase(),
+    ...findMergeSources(),
+    // それでも見つからなければ、共通部分を入力してもらう
+    'if not exist "%VIDEO%" echo.',
+    'if not exist "%VIDEO%" echo 元のファイルが見つかりませんでした。',
+    'if not exist "%VIDEO%" echo 名前を変更した場合は、その共通部分を入力してください。',
+    'if not exist "%VIDEO%" echo 例) 動画.video.ts なら 動画 と入力',
+    'if not exist "%VIDEO%" set /p "BASE=共通部分: "',
+    ...findMergeSources(),
+    '',
+    'if not exist "%VIDEO%" ' + bail('映像ファイルが見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
+    'if not exist "%AUDIO%" ' + bail('音声ファイルが見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
+    '',
+    'set "OUTPUT=%BASE%.mp4"',
     'echo.',
     'echo   映像: %VIDEO%',
     'echo   音声: %AUDIO%',
     'echo.',
-    '',
-    'if not exist "%VIDEO%" ' + bail('映像ファイルが見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
-    'if not exist "%AUDIO%" ' + bail('音声ファイルが見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
     '',
     ...requireFfmpeg(),
     ...askOutputName(),
@@ -213,17 +264,28 @@ export function buildMergeBat({ videoFile, audioFile, outputFile }) {
 export function buildConvertBat({ inputFile, outputFile }) {
   return join([
     ...header('MP4 に変換する'),
-    'set "INPUT=' + escapeForBatch(inputFile) + '"',
-    'set "OUTPUT=' + escapeForBatch(outputFile) + '"',
-    '',
     'echo ------------------------------------------------',
     'echo  MP4 に変換します',
     'echo ------------------------------------------------',
+    '',
+    'set "INPUT=' + escapeForBatch(inputFile) + '"',
+    'if not exist "%INPUT%" set "INPUT="',
+    '',
+    ...deriveBase(),
+    ...findConvertSource(),
+    'if not exist "%INPUT%" echo.',
+    'if not exist "%INPUT%" echo 変換元が見つかりませんでした。',
+    'if not exist "%INPUT%" echo 名前を変更した場合は、拡張子を除いた名前を入力してください。',
+    'if not exist "%INPUT%" echo 例) 動画.ts なら 動画 と入力',
+    'if not exist "%INPUT%" set /p "BASE=名前: "',
+    ...findConvertSource(),
+    '',
+    'if not exist "%INPUT%" ' + bail('変換元が見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
+    '',
+    'set "OUTPUT=%BASE%.mp4"',
     'echo.',
     'echo   変換元: %INPUT%',
     'echo.',
-    '',
-    'if not exist "%INPUT%" ' + bail('変換元が見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
     '',
     ...requireFfmpeg(),
     ...askOutputName(),
