@@ -86,6 +86,12 @@ async function waitFor(label, fn, timeoutMs = 40000, intervalMs = 500) {
   }
 }
 
+/** .bat は CP932 で書き出されるため、読むときも合わせる。 */
+const batDecoder = new TextDecoder('shift_jis');
+function readBat(file) {
+  return batDecoder.decode(fs.readFileSync(file));
+}
+
 function listFiles(dir) {
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir, { recursive: true })
@@ -300,6 +306,19 @@ async function main() {
     check('設定したサブフォルダに保存される',
       hlsFile.replace(/\\/g, '/').includes('/MediaGrabber/'), hlsFile);
 
+    const convertBat = await waitFor('変換用 .bat の保存', () => {
+      const bats = listFiles(downloadDir).filter((f) => f.endsWith('.変換.bat'));
+      return bats.length ? bats[0] : null;
+    }, 40000, 700);
+    check('.ts と一緒に MP4 変換用の .bat が保存される', !!convertBat, String(convertBat));
+
+    const convertText = readBat(convertBat);
+    check('.bat が実際に保存された .ts を参照している',
+      convertText.includes(path.basename(hlsFile)), convertText.slice(0, 200));
+    check('.bat が CP932 で書かれている（UTF-8 だと cmd の解析がずれる）',
+      !convertText.includes('�') && !convertText.includes('chcp'), convertText.slice(0, 120));
+    check('.bat にラベル付きの goto が含まれない', !/goto\s+\S/.test(convertText));
+
     // ---------------------------------------------------------------
     section('4. 直リンク(MP4)を保存する');
     const before = listFiles(downloadDir).length;
@@ -329,7 +348,7 @@ async function main() {
     check('音声パートが保存される', !!audioPart, String(audioPart));
     check('結合用の .bat が一緒に保存される', !!mergeBat, String(mergeBat));
 
-    const mergeText = fs.readFileSync(mergeBat, 'utf8');
+    const mergeText = readBat(mergeBat);
     check('.bat が映像・音声の実ファイル名を参照している',
       mergeText.includes(path.basename(videoPart)) && mergeText.includes(path.basename(audioPart)),
       mergeText.slice(0, 200));

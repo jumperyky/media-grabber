@@ -155,6 +155,7 @@ extension/
     xml.js               依存なしの最小 XML パーサ
     downloader.js        ダウンロード中核（fetch を注入するため単体で実行可能）
     batch.js             MP4 化用のバッチファイル生成
+    cp932.js             バッチファイルを CP932 で書き出すための符号化
 test/                       検証用（配布には不要）
 tools/make-icons.mjs        アイコン PNG の生成
 tools/make-fixtures.mjs     テスト用の実動画・HLS・DASH の生成
@@ -172,11 +173,11 @@ npm test
 - `npm run test:core` — ffmpeg で生成した実動画・HLS・DASH に対してダウンロード処理を実行し、
   出力を ffprobe で検証する（68 項目）
 - `npm run test:bat` — 生成した .bat を実際に cmd.exe で実行し、MP4 が作られることを
-  ffprobe で確認する（73 項目）
+  ffprobe で確認する（74 項目）
 - `npm run test:ext` — manifest の整合性と、chrome API をスタブ化した background.js の
   動作を検証する（38 項目）
 - `npm run test:e2e` — 実際の Chrome に拡張機能を読み込み、ポップアップ UI の
-  ボタンを操作して保存されたファイルを ffprobe で検証する（39 項目）
+  ボタンを操作して保存されたファイルを ffprobe で検証する（43 項目）
 
 事前に ffmpeg / ffprobe が必要です。テストフィクスチャの生成は次のコマンドで行います。
 

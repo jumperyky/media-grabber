@@ -1,6 +1,7 @@
 // Service Worker: メディア検出・状態管理・ダウンロード指示を担当する。
 import { classifyMedia, suggestFilename } from './lib/util.js';
 import { buildMergeBat, buildConvertBat, mp4NameFor } from './lib/batch.js';
+import { encodeCp932, encodeBatchFile } from './lib/cp932.js';
 
 /** タブ ID -> 検出したメディア項目の Map */
 const mediaByTab = new Map();
@@ -293,9 +294,8 @@ async function resolveSavedDir(downloadId) {
   return parts.join('\\');
 }
 
-/** テキストを chrome.downloads で保存できる data URL にする。 */
-function textToDataUrl(text) {
-  const bytes = new TextEncoder().encode(text);
+/** バイト列を chrome.downloads で保存できる data URL にする。 */
+function bytesToDataUrl(bytes) {
   let binary = '';
   for (const b of bytes) binary += String.fromCharCode(b);
   return 'data:application/octet-stream;base64,' + btoa(binary);
@@ -319,13 +319,15 @@ async function saveHelperBat(files, settings) {
   if (video && audio) {
     const videoName = await resolveSavedName(video.downloadId, wait) || video.filename.split('/').pop();
     const audioName = await resolveSavedName(audio.downloadId, wait) || audio.filename.split('/').pop();
-    const outputName = mp4NameFor(videoName);
-    content = buildMergeBat({ videoFile: videoName, audioFile: audioName, outputFile: outputName });
+    content = buildMergeBat({ videoFile: videoName, audioFile: audioName });
+    // CP932 で書けない文字がファイル名に含まれる場合は名前を埋め込まない。
+    // .bat 自身の名前から元ファイルを辿れるので、これでも動く。
+    if (!encodeCp932(content)) content = buildMergeBat({ videoFile: null, audioFile: null });
     batName = mp4NameFor(videoName).replace(/\.mp4$/i, '') + '.結合.bat';
   } else if (video && /\.ts$/i.test(video.filename)) {
     const inputName = await resolveSavedName(video.downloadId, wait) || video.filename.split('/').pop();
-    const outputName = mp4NameFor(inputName);
-    content = buildConvertBat({ inputFile: inputName, outputFile: outputName });
+    content = buildConvertBat({ inputFile: inputName });
+    if (!encodeCp932(content)) content = buildConvertBat({ inputFile: null });
     batName = mp4NameFor(inputName).replace(/\.mp4$/i, '') + '.変換.bat';
   }
 
@@ -333,12 +335,12 @@ async function saveHelperBat(files, settings) {
 
   try {
     const downloadId = await chrome.downloads.download({
-      url: textToDataUrl(content),
+      url: bytesToDataUrl(encodeBatchFile(content)),
       filename: buildPath(settings.subfolder, batName),
       saveAs: false,
       conflictAction: 'uniquify',
     });
-    return { downloadId, filename: batName, role: 'helper', bytes: content.length };
+    return { downloadId, filename: batName, role: 'helper', bytes: encodeBatchFile(content).length };
   } catch {
     // .bat の保存に失敗しても動画本体の保存は成功しているので、そのまま続ける
     return null;

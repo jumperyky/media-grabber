@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { buildMergeBat, buildConvertBat, mp4NameFor, escapeForBatch } from '../extension/lib/batch.js';
+import { encodeCp932, encodeBatchFile } from '../extension/lib/cp932.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.join(here, 'fixtures');
@@ -59,18 +60,26 @@ function freshDir(videoName = 'テスト動画.video.ts', audioName = 'テスト
  */
 function runBat(dir, batName, content, answers = [], args = []) {
   const batPath = path.join(dir, batName);
-  fs.writeFileSync(batPath, content, { encoding: 'utf8' });
-  const stdin = answers.map((a) => a + CRLF).join('');
+  // cmd.exe は起動時のコードページで解析するため CP932 で書き出す
+  fs.writeFileSync(batPath, Buffer.from(encodeBatchFile(content)));
+  // 入力もコンソールと同じ CP932 で渡す（手で打つ場合と同じ条件にする）
+  const stdin = Buffer.from(encodeCp932(answers.map((a) => a + CRLF).join('')) || new Uint8Array());
   try {
     const stdout = execFileSync('cmd.exe', ['/c', batPath, ...args], { cwd: dir, input: stdin, timeout: 60000 });
-    return { ok: true, output: stdout.toString('utf8') };
+    return { ok: true, output: decodeConsole(stdout) };
   } catch (err) {
     return {
       ok: false,
-      output: [err.stdout, err.stderr].filter(Boolean).map((b) => b.toString('utf8')).join('\n'),
+      output: [err.stdout, err.stderr].filter(Boolean).map(decodeConsole).join(String.fromCharCode(10)),
       status: err.status,
     };
   }
+}
+
+/** コンソール出力は CP932 で返ってくる。 */
+const consoleDecoder = new TextDecoder('shift_jis');
+function decodeConsole(buf) {
+  return consoleDecoder.decode(buf);
 }
 
 /** 解析エラー（行の破損）が起きていないか。 */
@@ -88,7 +97,8 @@ try {
   // ---------------------------------------------------------------
   section('1. 生成される中身');
   check('CRLF 改行で書き出す', mergeBat.includes(CRLF) && !/[^\r]\n/.test(mergeBat));
-  check('文字化け対策の chcp がある', mergeBat.includes('chcp 65001'));
+  check('CP932 で書き出せる（chcp に頼らない）',
+    encodeCp932(mergeBat) !== null && !mergeBat.includes('chcp'));
   check('置き場所に依存しないよう cd している', mergeBat.includes('cd /d "%~dp0"'));
   check('再エンコードしない (-c copy)', mergeBat.includes('-c copy'));
   check('ffmpeg の有無を先に調べる', mergeBat.includes('where ffmpeg'));
@@ -275,6 +285,8 @@ try {
     check('見つからない旨を伝えて終わる', r.output.includes('見つかりません'), r.output.slice(0, 200));
     check('MP4 は作られない', !fs.existsSync(path.join(dir, 'テスト動画.mp4')));
     check('失敗したときは .bat を消さない', fs.existsSync(path.join(dir, 'テスト動画.結合.bat')));
+    check('見つからない経路でも行が壊れない', noParseError(r.output),
+      r.output.split(String.fromCharCode(10)).filter((l) => l.includes('認識') || l.includes('recognized')).join(' | '));
   }
 
   // ---------------------------------------------------------------

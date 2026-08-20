@@ -1,6 +1,10 @@
 // ダウンロードしたファイルを ffmpeg で MP4 にするための Windows バッチファイルを組み立てる。
 // chrome API に依存しないため、Node からそのまま実行してテストできる。
 //
+// 注意 0: 書き出しは必ず lib/cp932.js の encodeBatchFile を通す。
+//   cmd.exe は起動時のコードページ（日本語環境では CP932）でバッチを解析するため、
+//   UTF-8 で書くとバイト境界がずれて行が分断される。
+//
 // 注意 1: ラベル付きの goto は使わない。
 //   cmd.exe は goto の飛び先をバイト位置で探すため、日本語（マルチバイト）を含む
 //   バッチファイルでは文字の途中に着地して行が壊れることがある。
@@ -33,11 +37,10 @@ function bail(message) {
   return '(echo.&echo ' + message + '&echo.&pause&exit /b 1)';
 }
 
-/** 先頭の共通部分。UTF-8 で保存するため chcp 65001 で文字化けを防ぐ。 */
+/** 先頭の共通部分。CP932 で書き出すため chcp は使わない。 */
 function header(title) {
   return [
     '@echo off',
-    'chcp 65001>nul',
     'cd /d "%~dp0"',
     'title ' + title,
     '',
@@ -209,18 +212,20 @@ function finish() {
  * 再エンコードしないため画質・音質は劣化しない。
  * 引数: %1 保存名 / %2 音ズレ補正 / %3 元ファイル削除 / %4 自身の削除
  */
-export function buildMergeBat({ videoFile, audioFile, outputFile }) {
+export function buildMergeBat({ videoFile, audioFile }) {
   return join([
     ...header('映像と音声を結合して MP4 にする'),
     'echo ------------------------------------------------',
     'echo  映像と音声を結合して MP4 にします',
     'echo ------------------------------------------------',
     '',
-    // 保存時の名前をまず試す
-    'set "VIDEO=' + escapeForBatch(videoFile) + '"',
-    'set "AUDIO=' + escapeForBatch(audioFile) + '"',
-    'if not exist "%VIDEO%" set "VIDEO="',
-    'if not exist "%AUDIO%" set "AUDIO="',
+    // 保存時の名前をまず試す（名前を渡さない場合は .bat 名からの推定だけで解決する）
+    ...(videoFile && audioFile ? [
+      'set "VIDEO=' + escapeForBatch(videoFile) + '"',
+      'set "AUDIO=' + escapeForBatch(audioFile) + '"',
+      'if not exist "%VIDEO%" set "VIDEO="',
+      'if not exist "%AUDIO%" set "AUDIO="',
+    ] : ['set "VIDEO="', 'set "AUDIO="']),
     '',
     // 見つからなければ、この .bat の名前から探す
     ...deriveBase(),
@@ -261,15 +266,17 @@ export function buildMergeBat({ videoFile, audioFile, outputFile }) {
  * 映像と音声が同じファイルに入っているため、音ズレ補正は用意しない。
  * 引数: %1 保存名 / %2 元ファイル削除 / %3 自身の削除
  */
-export function buildConvertBat({ inputFile, outputFile }) {
+export function buildConvertBat({ inputFile }) {
   return join([
     ...header('MP4 に変換する'),
     'echo ------------------------------------------------',
     'echo  MP4 に変換します',
     'echo ------------------------------------------------',
     '',
-    'set "INPUT=' + escapeForBatch(inputFile) + '"',
-    'if not exist "%INPUT%" set "INPUT="',
+    ...(inputFile ? [
+      'set "INPUT=' + escapeForBatch(inputFile) + '"',
+      'if not exist "%INPUT%" set "INPUT="',
+    ] : ['set "INPUT="']),
     '',
     ...deriveBase(),
     ...findConvertSource(),
