@@ -1,5 +1,7 @@
 // Service Worker: メディア検出・状態管理・ダウンロード指示を担当する。
 import { classifyMedia, suggestFilename } from './lib/util.js';
+import { buildMergeBat, buildConvertBat, mp4NameFor } from './lib/batch.js';
+import { encodeCp932, encodeBatchFile } from './lib/cp932.js';
 
 /** タブ ID -> 検出したメディア項目の Map */
 const mediaByTab = new Map();
@@ -14,7 +16,7 @@ let nextJobId = 1;
 let nextProbeRuleId = 1000000;
 
 const MAX_ITEMS_PER_TAB = 150;
-const DEFAULT_SETTINGS = { subfolder: 'MediaGrabber', saveAs: false, concurrency: 6 };
+const DEFAULT_SETTINGS = { subfolder: 'MediaGrabber', saveAs: false, concurrency: 6, saveHelperBat: true };
 
 async function getSettings() {
   const stored = await chrome.storage.local.get('settings');
@@ -253,7 +255,96 @@ async function downloadStreamJob(jobId, item, settings, variantIndex) {
 
   // 保存が始まったら Blob URL を解放する
   chrome.runtime.sendMessage({ target: 'offscreen', type: 'RELEASE', jobId }).catch(() => {});
+
+  if (settings.saveHelperBat) {
+    const helper = await saveHelperBat(files, settings);
+    if (helper) files.push(helper);
+  }
   return files;
+}
+
+/**
+ * 保存された実際のファイルの絶対パスを取得する。
+ * 同名ファイルがあると Chrome が「(1)」を付けるため、その結果を見てから .bat を作る。
+ */
+async function resolveSavedPath(downloadId, timeoutMs = 8000) {
+  const startedAt = Date.now();
+  for (;;) {
+    const [entry] = await chrome.downloads.search({ id: downloadId });
+    if (entry && entry.filename) return entry.filename;
+    // 保存ダイアログを閉じた（取り消した）場合はいくら待っても決まらない
+    if (entry && entry.state === 'interrupted') return null;
+    if (Date.now() - startedAt > timeoutMs) return null;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+/** 保存された実際のファイル名（フォルダーを除く）。 */
+async function resolveSavedName(downloadId) {
+  const full = await resolveSavedPath(downloadId);
+  return full ? full.split(/[\\/]/).pop() : null;
+}
+
+/** 保存先フォルダーの絶対パス。設定した場所と食い違っていないか確認するために表示する。 */
+async function resolveSavedDir(downloadId) {
+  const full = await resolveSavedPath(downloadId);
+  if (!full) return null;
+  const parts = full.split(/[\\/]/);
+  parts.pop();
+  return parts.join('\\');
+}
+
+/** バイト列を chrome.downloads で保存できる data URL にする。 */
+function bytesToDataUrl(bytes) {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return 'data:application/octet-stream;base64,' + btoa(binary);
+}
+
+/**
+ * ffmpeg を呼ぶだけの .bat を動画と同じ場所に保存する。
+ * 映像と音声が分かれていれば結合用、.ts 1 本なら MP4 変換用。
+ */
+async function saveHelperBat(files, settings) {
+  const video = files.find((f) => f.role === 'video');
+  const audio = files.find((f) => f.role === 'audio');
+
+  // 保存ダイアログを出す設定のときは、利用者が名前を入力し終えるまで待つ必要がある。
+  // ここで待ち切れないと、.bat の中身が入力前の名前のままになってしまう。
+  const wait = settings.saveAs ? 10 * 60 * 1000 : 8000;
+
+  let content = null;
+  let batName = null;
+
+  if (video && audio) {
+    const videoName = await resolveSavedName(video.downloadId, wait) || video.filename.split('/').pop();
+    const audioName = await resolveSavedName(audio.downloadId, wait) || audio.filename.split('/').pop();
+    content = buildMergeBat({ videoFile: videoName, audioFile: audioName });
+    // CP932 で書けない文字がファイル名に含まれる場合は名前を埋め込まない。
+    // .bat 自身の名前から元ファイルを辿れるので、これでも動く。
+    if (!encodeCp932(content)) content = buildMergeBat({ videoFile: null, audioFile: null });
+    batName = mp4NameFor(videoName).replace(/\.mp4$/i, '') + '.結合.bat';
+  } else if (video && /\.ts$/i.test(video.filename)) {
+    const inputName = await resolveSavedName(video.downloadId, wait) || video.filename.split('/').pop();
+    content = buildConvertBat({ inputFile: inputName });
+    if (!encodeCp932(content)) content = buildConvertBat({ inputFile: null });
+    batName = mp4NameFor(inputName).replace(/\.mp4$/i, '') + '.変換.bat';
+  }
+
+  if (!content) return null;
+
+  try {
+    const downloadId = await chrome.downloads.download({
+      url: bytesToDataUrl(encodeBatchFile(content)),
+      filename: buildPath(settings.subfolder, batName),
+      saveAs: false,
+      conflictAction: 'uniquify',
+    });
+    return { downloadId, filename: batName, role: 'helper', bytes: encodeBatchFile(content).length };
+  } catch {
+    // .bat の保存に失敗しても動画本体の保存は成功しているので、そのまま続ける
+    return null;
+  }
 }
 
 async function startDownload({ tabId, itemId, variantIndex }) {
@@ -283,13 +374,15 @@ async function startDownload({ tabId, itemId, variantIndex }) {
 
   (async () => {
     try {
+      let files;
       if (item.kind === 'direct') {
-        const r = await downloadDirect(enriched, settings);
-        setJob(jobId, { state: 'done', files: [r], handedToBrowser: true });
+        files = [await downloadDirect(enriched, settings)];
       } else {
-        const files = await downloadStreamJob(jobId, enriched, settings, variantIndex);
-        setJob(jobId, { state: 'done', files });
+        files = await downloadStreamJob(jobId, enriched, settings, variantIndex);
       }
+      // 実際の保存先を控えて、設定した場所と食い違っていないか確認できるようにする
+      const savedDir = files.length ? await resolveSavedDir(files[0].downloadId) : null;
+      setJob(jobId, { state: 'done', files, savedDir });
     } catch (err) {
       await clearRefererRule(jobId);
       setJob(jobId, { state: 'error', error: err?.message || String(err) });

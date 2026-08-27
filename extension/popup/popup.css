@@ -82,6 +82,16 @@ button.small { padding: 4px 10px; font-size: 12px; }
 .settings label > span { color: var(--muted); font-size: 12px; }
 .settings label.checkbox { display: flex; align-items: center; gap: 6px; }
 .settings label.checkbox > span { color: var(--fg); font-size: 13px; }
+.settings-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+.settings-note code { user-select: all; }
+
 .settings input[type="text"], .settings input[type="number"] {
   font: inherit;
   padding: 5px 8px;
