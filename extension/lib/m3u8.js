@@ -114,14 +114,16 @@ function parseMedia(lines, baseUrl) {
       if (a.URI) {
         initSegment = {
           url: resolveUrl(a.URI, baseUrl),
-          byteRange: a.BYTERANGE || null,
+          // downloader 側は {start, end} を期待するので、ここで変換しておく
+          byteRange: parseByteRange(a.BYTERANGE),
         };
       }
     } else if (line.startsWith('#EXTINF:')) {
       const parts = line.slice('#EXTINF:'.length).split(',');
       pendingDuration = Number(parts[0]) || 0;
     } else if (line.startsWith('#EXT-X-BYTERANGE:')) {
-      pendingByteRange = line.slice('#EXT-X-BYTERANGE:'.length);
+      // 同上。文字列のまま渡すと downloader で bytes=undefined-undefined になる
+      pendingByteRange = parseByteRange(line.slice('#EXT-X-BYTERANGE:'.length));
     } else if (!line.startsWith('#') && line.trim() !== '') {
       segments.push({
         url: resolveUrl(line.trim(), baseUrl),
