@@ -37,9 +37,10 @@ Video DownloadHelper と同種の機能を自前実装したもので、**回数
 
 - **DRM 保護コンテンツ**（Netflix / Amazon Prime / Disney+ など Widevine 系）
   技術的保護手段の回避に当たるため、意図的に実装していません。DASH の `ContentProtection` を検出した時点で中止します。
-- **暗号化された HLS**（`#EXT-X-KEY` が `AES-128` 等）も同様に中止します。
+- **SAMPLE-AES（FairPlay）など DRM 系の暗号化 HLS** も同様に中止します。
   該当する配信は一覧に `暗号化（非対応）` と表示され、ダウンロードボタンが無効になります。
-  TVer など、暗号化を適用している配信サービスはこれに該当します。
+  なお、鍵が URL で公開されている通常の **AES-128 暗号化 HLS は対応済み**で、復号して保存します。
+- **YouTube**。配信方式が SABR に変わり、URL からは動画の先頭 1 割ほどしか取得できません。
 - ライブ配信は「その時点で配信されている範囲」のみ保存されます。
 
 保存したファイルの利用は、各サイトの利用規約と著作権法の範囲内で行ってください。
@@ -171,9 +172,9 @@ npm test
 ```
 
 - `npm run test:core` — ffmpeg で生成した実動画・HLS・DASH に対してダウンロード処理を実行し、
-  出力を ffprobe で検証する（68 項目）
+  出力を ffprobe で検証する（82 項目）
 - `npm run test:bat` — 生成した .bat を実際に cmd.exe で実行し、MP4 が作られることを
-  ffprobe で確認する（74 項目）
+  ffprobe で確認する（81 項目）
 - `npm run test:ext` — manifest の整合性と、chrome API をスタブ化した background.js の
   動作を検証する（38 項目）
 - `npm run test:e2e` — 実際の Chrome に拡張機能を読み込み、ポップアップ UI の

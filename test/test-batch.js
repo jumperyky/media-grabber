@@ -113,7 +113,8 @@ try {
   check('出力ができたことを確かめてから削除に進む', mergeBat.includes('if not exist "%OUTPUT%" (echo.&echo 出力ファイルが作られませんでした'));
   check('自身の削除は最終行で行う',
     mergeBat.trimEnd().endsWith('if /i "%DELSELF%"=="y" ((goto) 2>nul & del /q "%~f0")'));
-  check('拡張子が無ければ .mp4 を補う', mergeBat.includes('"%OUTPUT:~-4%"==".mp4"'));
+  check('拡張子が無ければ補う（%EXT% は入れ物に応じて .mp4 / .mkv）', mergeBat.includes('"%OUTPUT:~-4%"=="%EXT%"') && mergeBat.includes('set "EXT=.mp4"'));
+  check('元が WebM なら MKV に切り替える', mergeBat.includes('if /i "%VIDEO:~-5%"==".webm" set "EXT=.mkv"'));
   check('ラベル付きの goto を使わない（日本語入りだと飛び先がずれるため）',
     !/goto\s+\S/.test(mergeBat), (mergeBat.match(/goto\s+\S+/g) || []).join(', '));
   check('遅延展開を使わない（! を含む名前で壊れないため）', !mergeBat.includes('enabledelayedexpansion'));
@@ -149,6 +150,32 @@ try {
     check('n を指定したので .bat も残る', fs.existsSync(path.join(dir, 'テスト動画.結合.bat')));
   }
 
+  // ---------------------------------------------------------------
+  section('2b. WebM の映像と音声は MKV に結合する');
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bat-'));
+    tempDirs.push(dir);
+    // VP8 + Opus の WebM を用意する（mp4 には無劣化で入らない組み合わせ）
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-map', '0:v', '-c:v', 'libvpx',
+      '-deadline', 'realtime', '-cpu-used', '8', '-b:v', '200k', path.join(dir, 'ウェブ動画.video.webm')]);
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', sample, '-map', '0:a', '-c:a', 'libopus',
+      path.join(dir, 'ウェブ動画.audio.webm')]);
+    const webmBat = buildMergeBat({ videoFile: 'ウェブ動画.video.webm', audioFile: 'ウェブ動画.audio.webm' });
+    const r = runBat(dir, 'ウェブ動画.結合.bat', webmBat, [''], ['', '0', 'n', 'n']);
+    check('エラーにならず終了する', r.ok, r.output);
+    const out = path.join(dir, 'ウェブ動画.mkv');
+    check('.mp4 ではなく .mkv ができる', fs.existsSync(out) && !fs.existsSync(path.join(dir, 'ウェブ動画.mp4')),
+      fs.readdirSync(dir).join(', '));
+    if (fs.existsSync(out)) {
+      const info = probeFile(out);
+      check('Matroska コンテナになっている', info.format.includes('matroska'), info.format);
+      check('映像と音声が両方入っている', info.hasVideo && info.hasAudio, JSON.stringify(info));
+      check('長さが元と同じ 6 秒', Math.abs(info.duration - 6) < 0.6, String(info.duration));
+    }
+    // 名前を入力しても .mkv が補われる
+    const r2 = runBat(dir, 'ウェブ動画.結合.bat', webmBat, ['別名'], ['', '0', 'n', 'n']);
+    check('入力した名前にも .mkv が付く', r2.ok && fs.existsSync(path.join(dir, '別名.mkv')), fs.readdirSync(dir).join(', '));
+  }
   // ---------------------------------------------------------------
   section('3. 保存名を入力して結合する');
   {

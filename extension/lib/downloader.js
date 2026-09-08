@@ -26,7 +26,7 @@ function delay(ms, signal) {
 }
 
 /** 失敗時にリトライしながら 1 本の URL を取得する。 */
-async function fetchBytes(url, { fetchFn, signal, byteRange, retries = 3 }) {
+async function fetchBytes(url, { fetchFn, signal, byteRange, retries = 3, retryDelayMs = 400 }) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     if (signal && signal.aborted) throw new DownloadError('中断しました', 'ABORTED');
@@ -43,7 +43,7 @@ async function fetchBytes(url, { fetchFn, signal, byteRange, retries = 3 }) {
       if (err instanceof DownloadError && err.code === 'ABORTED') throw err;
       if (err && err.name === 'AbortError') throw new DownloadError('中断しました', 'ABORTED');
       lastError = err;
-      if (attempt < retries) await delay(400 * (attempt + 1), signal);
+      if (attempt < retries) await delay(retryDelayMs * (attempt + 1), signal);
     }
   }
   throw new DownloadError('取得に失敗しました: ' + ((lastError && lastError.message) || url), 'FETCH_FAILED');
@@ -70,7 +70,9 @@ async function fetchAllSegments(segments, opts) {
       nextIndex += 1;
       if (i >= segments.length) return;
       const seg = segments[i];
-      const bytes = await fetchBytes(seg.url, { fetchFn, signal, byteRange: seg.byteRange });
+      const bytes = await fetchBytes(seg.url, {
+        fetchFn, signal, byteRange: seg.byteRange, retries: opts.retries, retryDelayMs: opts.retryDelayMs,
+      });
       results[i] = bytes;
       completed += 1;
       bytesTotal += bytes.length;
@@ -151,7 +153,7 @@ async function downloadHlsMedia(playlistUrl, opts) {
       let ivData;
       if (playlist.encryption.iv) {
         // M3U8にIVが明記されている場合
-        const hex = String(playlist.encryption.iv).replace('0x', '');
+        const hex = String(playlist.encryption.iv).replace(/^0x/i, '');
         ivData = new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
       } else {
         // IVが省略されている場合は、シーケンス番号をIVとして使用する
@@ -249,6 +251,69 @@ export async function downloadDash(manifestUrl, opts = {}) {
   }
 
   return { parts, duration: parsed.duration };
+}
+
+/** 1 回の範囲要求の上限。これを超えない範囲でできるだけ大きく取る。 */
+export const RANGE_CHUNK_MAX = 8 * 1024 * 1024;
+/** 1 回の範囲要求で取ってよいのは、ファイル全体の約 1/12 まで（googlevideo の制限）。 */
+export const RANGE_MAX_RATIO = 12;
+
+/**
+ * 分割の大きさを決める。googlevideo はファイル全体に対して大きすぎる範囲を
+ * 403（text/plain）で拒む。1.3GB なら 100MB は通るが 200MB は不可、18MB なら
+ * 1MB は通るが 8MB は不可、という具合に「全体の 1 割程度」が上限になっている。
+ */
+export function rangeChunkSize(totalBytes) {
+  const share = Math.floor((Number(totalBytes) || 0) / RANGE_MAX_RATIO);
+  return Math.max(64 * 1024, Math.min(RANGE_CHUNK_MAX, share));
+}
+
+/**
+ * 1 本のファイルを範囲要求に分けて取得する。
+ *
+ * 使い捨て URL（1 回の範囲要求にしか応じず、2 回目以降は 403 になるもの）向けに、
+ * 2 個目以降の範囲は opts.freshUrl() で URL を取り直しながら順番に取得する。
+ */
+export async function downloadRanged(url, totalBytes, opts = {}) {
+  const size = Number(totalBytes) || 0;
+  if (size <= 0) throw new DownloadError('ファイルサイズが分かりません', 'NO_SIZE');
+  const chunk = opts.chunkSize || rangeChunkSize(size);
+  const total = Math.ceil(size / chunk);
+  const attempts = opts.retries === undefined ? 3 : opts.retries;
+
+  const parts = [];
+  let bytes = 0;
+  let current = url;
+
+  for (let index = 0; index < total; index += 1) {
+    const start = index * chunk;
+    const byteRange = { start, end: Math.min(start + chunk, size) - 1 };
+
+    let got = null;
+    let lastError = null;
+    for (let attempt = 0; attempt <= attempts; attempt += 1) {
+      // 先頭以外、および失敗したあとは URL を取り直す
+      if ((index > 0 || attempt > 0) && opts.freshUrl) {
+        const next = await opts.freshUrl(index).catch(() => null);
+        if (next) current = next;
+      }
+      try {
+        got = await fetchBytes(current, { fetchFn: opts.fetchFn, signal: opts.signal, byteRange, retries: 0 });
+        break;
+      } catch (err) {
+        if (err instanceof DownloadError && err.code === 'ABORTED') throw err;
+        lastError = err;
+        if (attempt < attempts) await delay((opts.retryDelayMs || 600) * (attempt + 1), opts.signal);
+      }
+    }
+    if (!got) throw lastError || new DownloadError('取得に失敗しました', 'FETCH_FAILED');
+
+    parts.push(got);
+    bytes += got.length;
+    if (opts.onProgress) opts.onProgress({ completed: index + 1, total, bytes });
+  }
+
+  return { parts, bytes };
 }
 
 /** 種別に応じて適切なダウンローダを呼ぶ。 */

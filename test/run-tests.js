@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 
 import { parseM3U8, parseAttributes } from '../extension/lib/m3u8.js';
 import { parseMPD, parseISODuration, fillTemplate } from '../extension/lib/mpd.js';
-import { downloadHls, downloadDash, probeStream, DownloadError } from '../extension/lib/downloader.js';
+import { downloadHls, downloadDash, probeStream, downloadRanged, rangeChunkSize, DownloadError } from '../extension/lib/downloader.js';
 import { classifyMedia, sniffContainer, suggestFilename, mergeCommand, estimateBytes } from '../extension/lib/util.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -49,10 +49,21 @@ function startServer() {
       return;
     }
     const body = fs.readFileSync(file);
-    res.writeHead(200, {
-      'Content-Type': types[path.extname(file)] || 'application/octet-stream',
-      'Content-Length': body.length,
-    });
+    const type = types[path.extname(file)] || 'application/octet-stream';
+    const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || '');
+    if (range) {
+      const start = Number(range[1]);
+      const end = Math.min(range[2] === '' ? body.length - 1 : Number(range[2]), body.length - 1);
+      const slice = body.subarray(start, end + 1);
+      res.writeHead(206, {
+        'Content-Type': type,
+        'Content-Length': slice.length,
+        'Content-Range': 'bytes ' + start + '-' + end + '/' + body.length,
+      });
+      res.end(slice);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length });
     res.end(body);
   });
   return new Promise((resolve) => {
@@ -262,21 +273,48 @@ async function main() {
     check('結合コマンド文字列が正しい形', mergeCommand('a.mp4', 'b.mp4', 'c.mp4').startsWith('ffmpeg -i "a.mp4" -i "b.mp4" -c copy'));
 
     // ---------------------------------------------------------------
-    section('7. エラー処理');
-    const encProbe = await probeStream('hls', base + '/hls-encrypted/index.m3u8', opts);
-    check('暗号化された配信を事前に判別できる', encProbe.encrypted === true);
+    section('7. AES-128 で暗号化された HLS');
+    const aesProbe = await probeStream('hls', base + '/hls-encrypted/index.m3u8', opts);
+    check('AES-128 は対応済みなので「暗号化（非対応）」にしない', aesProbe.encrypted === false);
+
+    // 平文の hls-ts と完全一致すれば、復号もパディング除去も正しい
+    const plainTs = Buffer.concat(
+      fs.readdirSync(path.join(fixtures, 'hls-ts')).filter((f) => /^seg\d+\.ts$/.test(f))
+        .sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]))
+        .map((f) => fs.readFileSync(path.join(fixtures, 'hls-ts', f))));
+
+    // IV 省略（メディアシーケンス番号を IV にする。fixture は 7 から始まる）
+    const aesResult = await downloadHls(base + '/hls-encrypted/index.m3u8', opts);
+    const aesData = Buffer.from(aesResult.parts[0].data);
+    check('復号結果が平文と完全一致する（IV 省略・シーケンス番号から算出）', aesData.equals(plainTs),
+      aesData.length + ' vs ' + plainTs.length);
+    check('コンテナを ts と判定', aesResult.parts[0].ext === 'ts', aesResult.parts[0].ext);
+    const aesInfo = probeFile(writeOut('hls-aes128.ts', aesData));
+    check('復号した動画が再生可能で 6 秒',
+      aesInfo.hasVideo && aesInfo.hasAudio && Math.abs(aesInfo.duration - 6) < 0.6, JSON.stringify(aesInfo));
+
+    // IV 明示（0X 大文字の接頭辞）
+    const aesIvResult = await downloadHls(base + '/hls-encrypted-iv/index.m3u8', opts);
+    const aesIvData = Buffer.from(aesIvResult.parts[0].data);
+    check('復号結果が平文と完全一致する（IV 明示・0X 接頭辞）', aesIvData.equals(plainTs),
+      aesIvData.length + ' vs ' + plainTs.length);
+
+    // ---------------------------------------------------------------
+    section('8. エラー処理');
+    const encProbe = await probeStream('hls', base + '/hls-sample-aes/index.m3u8', opts);
+    check('SAMPLE-AES は事前に判別できる', encProbe.encrypted === true);
 
     let encryptedError = null;
     try {
-      await downloadHls(base + '/hls-encrypted/index.m3u8', opts);
+      await downloadHls(base + '/hls-sample-aes/index.m3u8', opts);
     } catch (err) {
       encryptedError = err;
     }
-    check('暗号化された配信はダウンロードを中止する',
+    check('SAMPLE-AES はダウンロードを中止する',
       encryptedError instanceof DownloadError && encryptedError.code === 'ENCRYPTED',
       encryptedError && encryptedError.code);
     check('中止の理由が分かるメッセージ',
-      encryptedError && encryptedError.message.includes('AES-128'), encryptedError && encryptedError.message);
+      encryptedError && encryptedError.message.includes('SAMPLE-AES'), encryptedError && encryptedError.message);
 
     let missingRejected = false;
     try {
@@ -295,6 +333,36 @@ async function main() {
       aborted = err instanceof DownloadError && err.code === 'ABORTED';
     }
     check('中断シグナルで停止する', aborted);
+
+    // ---------------------------------------------------------------
+    section('範囲を分けて取得する');
+
+    // Range 必須・1 回の範囲に上限があるサーバ向けに、分割して取得できること
+    const mp4File = path.join(fixtures, 'direct/sample.mp4');
+    const mp4Full = fs.readFileSync(mp4File);
+    let freshCalls = 0;
+    const ranged = await downloadRanged(base + '/direct/sample.mp4', mp4Full.length, {
+      fetchFn: (url, o) => fetch(url, o),
+      chunkSize: 16 * 1024,
+      freshUrl: async () => { freshCalls += 1; return base + '/direct/sample.mp4'; },
+    });
+    const rebuilt = Buffer.concat(ranged.parts.map((p) => Buffer.from(p)));
+    check('分割数が範囲の大きさに従う',
+      ranged.parts.length === Math.ceil(mp4Full.length / (16 * 1024)), String(ranged.parts.length));
+    check('分割取得しても中身が一致する', rebuilt.equals(mp4Full));
+    check('取得バイト数が一致する', ranged.bytes === mp4Full.length);
+    check('2 個目以降の範囲で URL を取り直す', freshCalls === ranged.parts.length - 1, String(freshCalls));
+    const rangedProbe = probeFile(writeOut('ranged.mp4', rebuilt));
+    check('分割取得した動画が再生可能', rangedProbe.hasVideo && rangedProbe.duration > 0);
+    check('大きなファイルでは上限いっぱいまで使う', rangeChunkSize(1362269481) === 8 * 1024 * 1024);
+    check('小さなファイルでは 1/12 まで落とす', rangeChunkSize(18294110) === Math.floor(18294110 / 12));
+    check('極端に小さくはしない', rangeChunkSize(1000) === 64 * 1024);
+
+    let noSizeError = null;
+    try {
+      await downloadRanged(base + '/direct/sample.mp4', 0, { fetchFn: (url, o) => fetch(url, o) });
+    } catch (err) { noSizeError = err; }
+    check('サイズ不明なら中止する', noSizeError instanceof DownloadError && noSizeError.code === 'NO_SIZE');
 
     // ---------------------------------------------------------------
     console.log('\n===================================');

@@ -344,7 +344,9 @@ function renderJob(job) {
         helper.filename + ' をダブルクリックすると MP4 にできます。保存名はその場で変更できます。'));
       node.append(hint);
     } else if (v && a) {
-      const out = v.filename.replace(/\.video\.[a-z0-9]+$/i, '.mp4');
+      // VP9/AV1/Opus は mp4 に無劣化で入らないため、WebM は MKV を案内する
+      const container = /\.webm$/i.test(v.filename) ? '.mkv' : '.mp4';
+      const out = v.filename.replace(/\.video\.[a-z0-9]+$/i, container);
       const hint = el('div', 'hint');
       hint.append(document.createTextNode('映像と音声が別ファイルです。次のコマンドで結合できます:'));
       hint.append(document.createElement('br'));

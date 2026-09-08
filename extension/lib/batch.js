@@ -82,6 +82,18 @@ function findConvertSource() {
   return lines;
 }
 
+/**
+ * 出力の入れ物を決める。元が WebM なら MKV、それ以外は MP4。
+ * VP9 / AV1 / Opus は mp4 に入れると再生できない環境が多いため。
+ */
+function chooseContainer(varName) {
+  return [
+    'set "EXT=.mp4"',
+    'if /i "%' + varName + ':~-5%"==".webm" set "EXT=.mkv"',
+    '',
+  ];
+}
+
 /** ffmpeg の有無を調べる。無ければその場で終了する。 */
 function requireFfmpeg() {
   return [
@@ -93,14 +105,14 @@ function requireFfmpeg() {
 
 /**
  * 保存名を決める。第 1 引数があればそれを使い、無ければ入力を求める。
- * 何も入力せずに Enter を押した場合は既定の名前を使う。拡張子が .mp4 でなければ補う。
+ * 何も入力せずに Enter を押した場合は既定の名前を使う。拡張子（%EXT%）が無ければ補う。
  */
 function askOutputName() {
   return [
     'set "NEWNAME=%~1"',
     'if "%NEWNAME%"=="" set /p "NEWNAME=保存する名前 (Enter でそのまま: %OUTPUT%): "',
     'if not "%NEWNAME%"=="" set "OUTPUT=%NEWNAME%"',
-    'if /i not "%OUTPUT:~-4%"==".mp4" set "OUTPUT=%OUTPUT%.mp4"',
+    'if /i not "%OUTPUT:~-4%"=="%EXT%" set "OUTPUT=%OUTPUT%%EXT%"',
     '',
   ];
 }
@@ -241,7 +253,9 @@ export function buildMergeBat({ videoFile, audioFile }) {
     'if not exist "%VIDEO%" ' + bail('映像ファイルが見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
     'if not exist "%AUDIO%" ' + bail('音声ファイルが見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
     '',
-    'set "OUTPUT=%BASE%.mp4"',
+    // VP9/AV1/Opus は mp4 に無劣化で入らないため、WebM は MKV にする
+    ...chooseContainer('VIDEO'),
+    'set "OUTPUT=%BASE%%EXT%"',
     'echo.',
     'echo   映像: %VIDEO%',
     'echo   音声: %AUDIO%',
@@ -289,7 +303,8 @@ export function buildConvertBat({ inputFile }) {
     '',
     'if not exist "%INPUT%" ' + bail('変換元が見つかりません。この .bat は動画と同じフォルダーで実行してください。'),
     '',
-    'set "OUTPUT=%BASE%.mp4"',
+    ...chooseContainer('INPUT'),
+    'set "OUTPUT=%BASE%%EXT%"',
     'echo.',
     'echo   変換元: %INPUT%',
     'echo.',

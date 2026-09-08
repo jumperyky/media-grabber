@@ -14,6 +14,8 @@ const extDir = path.join(here, '..', 'extension');
 const fixtures = path.join(here, 'fixtures');
 const pageDir = path.join(here, 'page');
 const downloadDir = path.join(here, 'e2e-downloads');
+// 名前を直書きすると manifest のリネームで別の内蔵拡張を掴んでしまう
+const manifestName = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8')).name;
 
 let passed = 0;
 let failed = 0;
@@ -178,12 +180,12 @@ async function main() {
         if (t.type !== 'service_worker' || !t.url.startsWith('chrome-extension://')) continue;
         const sessionId = await cdp.attach(t.targetId);
         const name = await cdp.evaluate(sessionId, 'chrome.runtime.getManifest().name');
-        if (name === 'Media Grabber') return { target: t, sessionId };
+        if (name === manifestName) return { target: t, sessionId };
       }
       return null;
     }, 30000);
     const extId = new URL(swInfo.target.url).host;
-    check('拡張機能 "Media Grabber" が読み込まれた', !!extId, extId);
+    check('拡張機能 "' + manifestName + '" が読み込まれた', !!extId, extId);
 
     // ---------------------------------------------------------------
     section('1. ページ上の動画を検出する');
