@@ -1,5 +1,5 @@
 // Service Worker: メディア検出・状態管理・ダウンロード指示を担当する。
-import { classifyMedia, suggestFilename } from './lib/util.js';
+import { classifyMedia, directExtension, baseContentType, suggestFilename } from './lib/util.js';
 import { buildMergeBat, buildConvertBat, mp4NameFor } from './lib/batch.js';
 import { encodeCp932, encodeBatchFile } from './lib/cp932.js';
 
@@ -70,7 +70,7 @@ chrome.webRequest.onHeadersReceived.addListener(
       return h ? h.value : '';
     };
     const contentType = get('content-type');
-    const kind = classifyMedia(details.url, contentType);
+    const kind = classifyMedia(details.url, contentType, { mediaElement: details.type === 'media' });
     if (!kind) return;
 
     // 極端に小さい応答（エラーページ等）は無視する
@@ -81,7 +81,7 @@ chrome.webRequest.onHeadersReceived.addListener(
       url: details.url,
       kind,
       size,
-      contentType: contentType.split(';')[0].trim(),
+      contentType: baseContentType(contentType),
       source: 'network',
       title: pageInfoByTab.get(details.tabId)?.title || '',
     });
@@ -123,7 +123,11 @@ async function ensureOffscreen() {
 // Referer 付与（CDN が Referer を要求する場合の対策）
 // ---------------------------------------------------------------------------
 
-async function setRefererRule(ruleId, mediaUrl, pageUrl) {
+/**
+ * 指定ホストへのリクエストに Referer（と Origin）を付ける。
+ * offscreen の fetch は xmlhttprequest、chrome.downloads の取得は other として扱われる。
+ */
+async function setRefererRule(ruleId, mediaUrl, pageUrl, { resourceTypes = ['xmlhttprequest'], withOrigin = true } = {}) {
   if (!pageUrl) return;
   let host;
   try {
@@ -147,12 +151,12 @@ async function setRefererRule(ruleId, mediaUrl, pageUrl) {
           type: 'modifyHeaders',
           requestHeaders: [
             { header: 'referer', operation: 'set', value: origin },
-            { header: 'origin', operation: 'set', value: new URL(pageUrl).origin },
+            ...(withOrigin ? [{ header: 'origin', operation: 'set', value: new URL(pageUrl).origin }] : []),
           ],
         },
         condition: {
           requestDomains: [host],
-          resourceTypes: ['xmlhttprequest'],
+          resourceTypes,
           tabIds: [-1],
         },
       }],
@@ -189,29 +193,41 @@ function setJob(jobId, patch) {
   return job;
 }
 
-/** 直リンクは Chrome のダウンローダに任せる（メモリを消費せず、大きなファイルも扱える）。 */
-async function downloadDirect(item, settings) {
-  const ext = (() => {
-    try {
-      const m = new URL(item.url).pathname.match(/\.([a-z0-9]{1,5})$/i);
-      if (m) return m[1].toLowerCase();
-    } catch { /* URL 解析失敗時は Content-Type から決める */ }
-    if (item.contentType && item.contentType.includes('/')) {
-      const sub = item.contentType.split('/')[1];
-      if (sub === 'quicktime') return 'mov';
-      if (sub === 'x-matroska') return 'mkv';
-      return sub.replace(/^x-/, '');
-    }
-    return 'mp4';
-  })();
+/**
+ * ダウンロードがサーバーから応答を受け取り始めるまで待つ。
+ * Referer のルールはリクエストの送信時にだけ要るので、ここまで来たら外してよい。
+ */
+async function waitForDownloadResponse(downloadId, timeoutMs = 60000) {
+  const startedAt = Date.now();
+  for (;;) {
+    const [entry] = await chrome.downloads.search({ id: downloadId });
+    if (!entry || entry.state !== 'in_progress' || entry.bytesReceived > 0 || entry.totalBytes > 0) return;
+    if (Date.now() - startedAt > timeoutMs) return;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
 
+/** 直リンクは Chrome のダウンローダに任せる（メモリを消費せず、大きなファイルも扱える）。 */
+async function downloadDirect(jobId, item, settings) {
+  const ext = directExtension(item.url, item.contentType);
   const filename = suggestFilename({ title: item.title, url: item.url, ext });
-  const downloadId = await chrome.downloads.download({
-    url: item.url,
-    filename: buildPath(settings.subfolder, filename),
-    saveAs: settings.saveAs,
-    conflictAction: 'uniquify',
-  });
+
+  // Referer が無いと 403 を返す CDN があるため、ページのオリジンを付けて取りに行く。
+  // 通常のリンクのダウンロードと同じく Origin は付けない（付けると拒否するサーバーがある）。
+  await setRefererRule(jobId, item.url, item.pageUrl, { resourceTypes: ['other', 'media'], withOrigin: false });
+  let downloadId;
+  try {
+    downloadId = await chrome.downloads.download({
+      url: item.url,
+      filename: buildPath(settings.subfolder, filename),
+      saveAs: settings.saveAs,
+      conflictAction: 'uniquify',
+    });
+  } catch (err) {
+    await clearRefererRule(jobId);
+    throw err;
+  }
+  waitForDownloadResponse(downloadId).finally(() => clearRefererRule(jobId));
   return { downloadId, filename };
 }
 
@@ -376,7 +392,7 @@ async function startDownload({ tabId, itemId, variantIndex }) {
     try {
       let files;
       if (item.kind === 'direct') {
-        files = [await downloadDirect(enriched, settings)];
+        files = [await downloadDirect(jobId, enriched, settings)];
       } else {
         files = await downloadStreamJob(jobId, enriched, settings, variantIndex);
       }
@@ -434,13 +450,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tabId = sender.tab?.id;
         if (tabId === undefined) { sendResponse({ ok: false }); break; }
         for (const found of msg.items || []) {
-          const kind = classifyMedia(found.url, found.contentType || '');
+          // <video>/<audio> の src なので、型が不明でもメディアとして扱う
+          const kind = classifyMedia(found.url, found.contentType || '', { mediaElement: true });
           if (!kind) continue;
           addItem(tabId, {
             url: found.url,
             kind,
             size: 0,
-            contentType: found.contentType || '',
+            contentType: baseContentType(found.contentType),
             source: 'dom',
             title: msg.title || '',
             width: found.width || null,

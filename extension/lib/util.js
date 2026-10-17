@@ -82,14 +82,55 @@ export function formatDuration(sec) {
   return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`;
 }
 
-/** URL と Content-Type からメディア種別を判定する。対象外なら null。 */
-export function classifyMedia(url, contentType = '') {
+/** 直リンクとして扱う拡張子。 */
+const DIRECT_EXTS = [
+  'mp4', 'm4v', 'webm', 'mkv', 'mov', 'avi', 'flv', 'ogv',
+  'm4a', 'mp3', 'aac', 'ogg', 'oga', 'opus', 'weba', 'wav', 'flac',
+];
+
+/** Content-Type（パラメータを除いた小文字）と拡張子の対応。サブタイプ名と拡張子が違うものだけ書く。 */
+const TYPE_TO_EXT = {
+  'video/quicktime': 'mov',
+  'video/x-matroska': 'mkv',
+  'video/x-msvideo': 'avi',
+  'video/x-flv': 'flv',
+  'video/ogg': 'ogv',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/aac': 'aac',
+  'audio/aacp': 'aac',
+  'audio/x-aac': 'aac',
+  'audio/wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/vnd.wave': 'wav',
+  'audio/x-flac': 'flac',
+  'audio/webm': 'weba',
+};
+
+/** Content-Type のパラメータ（codecs など）を落として小文字にする。 */
+export function baseContentType(contentType) {
+  return String(contentType || '').toLowerCase().split(';')[0].trim();
+}
+
+function urlExtension(url) {
   let pathname = url;
   try {
     pathname = new URL(url).pathname;
   } catch { /* 相対 URL 等はそのまま拡張子判定に回す */ }
-  const ct = String(contentType).toLowerCase().split(';')[0].trim();
-  const ext = (pathname.match(/\.([a-z0-9]{1,5})$/i)?.[1] || '').toLowerCase();
+  return (pathname.match(/\.([a-z0-9]{1,5})$/i)?.[1] || '').toLowerCase();
+}
+
+/**
+ * URL と Content-Type からメディア種別を判定する。対象外なら null。
+ * mediaElement は <video>/<audio> が読み込んだもの（DOM で見つけた src や、
+ * webRequest の type が media のもの）。この場合は型が不明でも、.aac でも直リンクとみなす。
+ */
+export function classifyMedia(url, contentType = '', { mediaElement = false } = {}) {
+  const ct = baseContentType(contentType);
+  const ext = urlExtension(url);
 
   if (ct === 'application/vnd.apple.mpegurl' || ct === 'application/x-mpegurl' ||
       ct === 'audio/mpegurl' || ct === 'audio/x-mpegurl' || ext === 'm3u8' || ext === 'm3u') {
@@ -97,13 +138,31 @@ export function classifyMedia(url, contentType = '') {
   }
   if (ct === 'application/dash+xml' || ext === 'mpd') return 'dash';
 
-  // 個々のセグメントは一覧に出さない（プレイリスト側で扱う）
-  if (ext === 'ts' || ext === 'm4s' || ext === 'aac' || ext === 'vtt') return null;
+  // 個々のセグメントは一覧に出さない（プレイリスト側で扱う）。
+  // .aac は HLS の音声セグメントにも使われるため、メディア要素が直接読んだものだけ対象にする。
+  if (ext === 'ts' || ext === 'm4s' || ext === 'vtt') return null;
+  if (ext === 'aac') return mediaElement ? 'direct' : null;
 
-  const directExts = ['mp4', 'm4v', 'webm', 'mkv', 'mov', 'avi', 'flv', 'ogv', 'm4a', 'mp3', 'ogg', 'wav', 'flac'];
-  if (directExts.includes(ext)) return 'direct';
+  if (DIRECT_EXTS.includes(ext)) return 'direct';
   if (ct.startsWith('video/') || ct.startsWith('audio/')) return 'direct';
+  // application/octet-stream などで配信されていても、メディア要素が再生しているなら中身はメディア
+  if (mediaElement && (!ct || ct === 'application/octet-stream' || ct === 'binary/octet-stream')) return 'direct';
   return null;
+}
+
+/**
+ * 直リンクを保存するときの拡張子。
+ * URL の拡張子はメディアのものだけを信用し（.php などは使わない）、無ければ Content-Type から決める。
+ */
+export function directExtension(url, contentType = '') {
+  const ext = urlExtension(url);
+  if (DIRECT_EXTS.includes(ext)) return ext;
+  const ct = baseContentType(contentType);
+  if (TYPE_TO_EXT[ct]) return TYPE_TO_EXT[ct];
+  const m = ct.match(/^(video|audio)\/(?:x-)?([a-z0-9]{1,5})$/);
+  if (m && DIRECT_EXTS.includes(m[2])) return m[2];
+  if (ct.startsWith('audio/')) return 'm4a';
+  return 'mp4';
 }
 
 /** ビットレート(bps)と長さ(秒)からおおよそのファイルサイズ(バイト)を求める。 */

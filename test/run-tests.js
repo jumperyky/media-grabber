@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { parseM3U8, parseAttributes } from '../extension/lib/m3u8.js';
 import { parseMPD, parseISODuration, fillTemplate } from '../extension/lib/mpd.js';
 import { downloadHls, downloadDash, probeStream, downloadRanged, rangeChunkSize, DownloadError } from '../extension/lib/downloader.js';
-import { classifyMedia, sniffContainer, suggestFilename, mergeCommand, estimateBytes } from '../extension/lib/util.js';
+import { classifyMedia, directExtension, sniffContainer, suggestFilename, mergeCommand, estimateBytes } from '../extension/lib/util.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.join(here, 'fixtures');
@@ -110,6 +110,23 @@ async function main() {
     check('拡張子なしでも Content-Type で判定', classifyMedia('https://x/api/stream?id=9', 'video/mp4') === 'direct');
     check('セグメント(.ts)は一覧に出さない', classifyMedia('https://x/seg1.ts', 'video/mp2t') === null);
     check('画像は対象外', classifyMedia('https://x/a.png', 'image/png') === null);
+    check('.aac はセグメントの可能性があるので通常は対象外', classifyMedia('https://x/seg1.aac', 'audio/aac') === null);
+    check('メディア要素が読んだ .aac は direct', classifyMedia('https://x/song.aac', 'audio/aac', { mediaElement: true }) === 'direct');
+    check('.opus は direct', classifyMedia('https://x/song.opus', '') === 'direct');
+    check('octet-stream は通常は対象外', classifyMedia('https://x/get?id=1', 'application/octet-stream') === null);
+    check('メディア要素が読んだ octet-stream は direct',
+      classifyMedia('https://x/get?id=1', 'application/octet-stream', { mediaElement: true }) === 'direct');
+    check('メディア要素でも .ts セグメントは対象外', classifyMedia('https://x/seg1.ts', 'video/mp2t', { mediaElement: true }) === null);
+
+    check('拡張子: URL のメディア拡張子を使う', directExtension('https://x/a/song.mp3', 'audio/mpeg') === 'mp3');
+    check('拡張子: .php などは使わず Content-Type から決める', directExtension('https://x/play.php?id=1', 'audio/mpeg') === 'mp3');
+    check('拡張子: audio/mpeg は mp3', directExtension('https://x/api/audio?id=1', 'audio/mpeg') === 'mp3');
+    check('拡張子: audio/mp4 は m4a', directExtension('https://x/api/audio?id=1', 'audio/mp4') === 'm4a');
+    check('拡張子: audio/x-wav は wav', directExtension('https://x/api/audio?id=1', 'audio/x-wav') === 'wav');
+    check('拡張子: codecs 付きの型でも壊れない',
+      directExtension('https://x/api/v?id=1', 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"') === 'mp4');
+    check('拡張子: video/quicktime は mov', directExtension('https://x/v', 'video/quicktime') === 'mov');
+    check('拡張子: 型が不明なら mp4', directExtension('https://x/get?id=1', 'application/octet-stream') === 'mp4');
 
     const tsBytes = fs.readFileSync(path.join(fixtures, 'hls-ts/seg0.ts'));
     const mp4Bytes = fs.readFileSync(path.join(fixtures, 'direct/sample.mp4'));

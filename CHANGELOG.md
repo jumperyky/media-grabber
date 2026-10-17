@@ -1,5 +1,21 @@
 # 変更履歴
 
+## 1.5.1
+
+直リンク（mp4 / mp3 などのファイル 1 本）が保存できない、または開けない問題を修正した。
+
+### 修正
+- 直リンクの保存で Referer を送っていなかったため、Referer を要求する CDN で 403 になっていた。
+  `chrome.downloads` の取得にもページのオリジンを Referer として付けるようにした
+  （通常のリンク保存と同じく Origin は付けない。応答が返り始めたらルールを外す）
+- 単体の `.aac` 音声を HLS のセグメントとみなして一覧から外していた。
+  `<audio>` / `<video>` が読み込んだもの（DOM 由来か webRequest の type が media）は対象にする
+- `application/octet-stream` で配信される音声・動画を検出できなかった。
+  メディア要素が読み込んだものに限って直リンクとして扱う
+- 保存時の拡張子が URL や Content-Type からそのまま作られていたため、
+  `play.php` → `.php`、`audio/mpeg` → `.mpeg`、`video/mp4; codecs=...` → 壊れたファイル名になっていた。
+  URL の拡張子はメディアのものだけを使い、それ以外は Content-Type の対応表で決める（`directExtension`）
+
 ## 1.5.0
 
 AES-128 対応の作業ブランチ（`Moviedownloader_AES128support`）を本体に統合した。

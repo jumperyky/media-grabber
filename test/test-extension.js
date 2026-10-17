@@ -155,9 +155,10 @@ function sendToBackground(msg, sender = {}) {
   });
 }
 
-function fireHeaders(url, contentType, contentLength, tabId = 1) {
+function fireHeaders(url, contentType, contentLength, tabId = 1, type = 'xmlhttprequest') {
   headersListener({
     tabId,
+    type,
     url,
     responseHeaders: [
       { name: 'Content-Type', value: contentType },
@@ -220,6 +221,47 @@ check('元 URL をそのまま渡す（大容量でもメモリを使わない�
 check('サブフォルダとページタイトルからファイル名を決める',
   dl.filename === 'MediaGrabber/サンプル動画のページ.mp4', dl.filename);
 check('重複時は自動連番', dl.conflictAction === 'uniquify');
+const directRule = calls.dnrRules.flatMap((r) => r.addRules || []).find((x) => x.id === r1.jobId);
+check('直リンクにも Referer を付与する DNR ルールを追加した',
+  !!directRule && directRule.action.requestHeaders.some((h) => h.header === 'referer' && h.value === 'https://example.com/'),
+  JSON.stringify(directRule));
+check('直リンクのルールは chrome.downloads の取得（other）に効く',
+  !!directRule && directRule.condition.resourceTypes.includes('other') && directRule.condition.requestDomains[0] === 'cdn.example.com');
+check('直リンクでは Origin を付けない',
+  !!directRule && !directRule.action.requestHeaders.some((h) => h.header === 'origin'));
+check('応答を受け取り始めたら直リンクのルールを外す',
+  calls.dnrRules.some((r) => (r.removeRuleIds || []).includes(r1.jobId) && !r.addRules));
+
+// ---------------------------------------------------------------------------
+section('3b. 音声ファイルの検出と拡張子');
+
+const AUDIO_TAB = 7;
+await sendToBackground({ type: 'PAGE_INFO', title: '音声のページ', url: 'https://music.example.com/track' },
+  { tab: { id: AUDIO_TAB }, frameId: 0 });
+// <audio> 要素が読んだ .aac と octet-stream は検出し、XHR で取った .aac（HLS のセグメント）は出さない
+fireHeaders('https://cdn.example.com/song.aac', 'audio/aac', 3 * 1024 * 1024, AUDIO_TAB, 'media');
+fireHeaders('https://cdn.example.com/stream?id=42', 'application/octet-stream', 3 * 1024 * 1024, AUDIO_TAB, 'media');
+fireHeaders('https://cdn.example.com/hls/seg3.aac', 'audio/aac', 300000, AUDIO_TAB, 'xmlhttprequest');
+fireHeaders('https://cdn.example.com/blob?id=1', 'application/octet-stream', 3 * 1024 * 1024, AUDIO_TAB, 'xmlhttprequest');
+await sendToBackground({
+  type: 'MEDIA_FOUND',
+  title: '音声のページ',
+  items: [{ url: 'https://music.example.com/play.php?id=9', contentType: 'audio/mpeg; codecs="mp3"' }],
+}, { tab: { id: AUDIO_TAB }, frameId: 0 });
+
+const audioListed = await sendToBackground({ type: 'LIST', tabId: AUDIO_TAB });
+const audioUrls = audioListed.items.map((i) => i.url);
+check('<audio> が読んだ .aac を検出', audioUrls.includes('https://cdn.example.com/song.aac'), JSON.stringify(audioUrls));
+check('<audio> が読んだ octet-stream を検出', audioUrls.includes('https://cdn.example.com/stream?id=42'));
+check('XHR の .aac セグメントと octet-stream は出さない', audioUrls.length === 3, JSON.stringify(audioUrls));
+const phpItem = audioListed.items.find((i) => i.url.includes('play.php'));
+check('DOM 由来の型から codecs を落とす', phpItem && phpItem.contentType === 'audio/mpeg', phpItem && phpItem.contentType);
+
+calls.downloads.length = 0;
+await sendToBackground({ type: 'START_DOWNLOAD', tabId: AUDIO_TAB, itemId: phpItem.id });
+await new Promise((r) => setTimeout(r, 50));
+check('.php の URL でも mp3 として保存する',
+  calls.downloads.at(-1)?.filename === 'MediaGrabber/音声のページ.mp3', calls.downloads.at(-1)?.filename);
 
 // ---------------------------------------------------------------------------
 section('4. HLS のダウンロード（offscreen 連携）');
