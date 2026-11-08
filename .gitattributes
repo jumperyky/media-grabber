@@ -1,0 +1,12 @@
+# 改行コードは LF に統一する。
+# 以前は CRLF のファイルと LF のファイルが半々で混在しており、
+# コミットのたびに "LF will be replaced by CRLF" の警告が出ていた。
+* text=auto eol=lf
+
+# 画像は変換しない
+*.png binary
+
+# .bat だけは CRLF でないと cmd が解析を誤る。
+# 実行時に生成する .bat は batch.js の join('\r\n') が面倒を見るが、
+# リポジトリに直接置く場合に備えて明示しておく。
+*.bat text eol=crlf
