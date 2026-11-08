@@ -11,6 +11,9 @@ import { parseMPD, parseISODuration, fillTemplate } from '../extension/lib/mpd.j
 import { downloadHls, downloadDash, probeStream, downloadRanged, rangeChunkSize, DownloadError } from '../extension/lib/downloader.js';
 import { classifyMedia, sniffContainer, suggestFilename, mergeCommand, estimateBytes } from '../extension/lib/util.js';
 
+/** パートのセグメント配列を 1 本の Buffer にする（検証用）。 */
+const partBuf = (p) => Buffer.concat(p.chunks.map((c) => Buffer.from(c)));
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.join(here, 'fixtures');
 const outDir = path.join(here, 'out');
@@ -200,7 +203,11 @@ async function main() {
     check('パート数 1（音声多重化済み）', hlsTs.parts.length === 1);
     check('拡張子 ts', hlsTs.parts[0].ext === 'ts');
     check('進捗コールバックが発火', progressSeen === 3, String(progressSeen));
-    const tsFile = writeOut('hls-ts.ts', hlsTs.parts[0].data);
+    check('パートは連結せずセグメント配列で返る', Array.isArray(hlsTs.parts[0].chunks) && hlsTs.parts[0].chunks.length === 3,
+      String(hlsTs.parts[0].chunks && hlsTs.parts[0].chunks.length));
+    check('bytes がセグメント合計と一致', hlsTs.parts[0].bytes === partBuf(hlsTs.parts[0]).length,
+      hlsTs.parts[0].bytes + ' vs ' + partBuf(hlsTs.parts[0]).length);
+    const tsFile = writeOut('hls-ts.ts', partBuf(hlsTs.parts[0]));
     const tsInfo = probeFile(tsFile);
     check('再生可能で 6 秒', Math.abs(tsInfo.duration - 6) < 0.5, String(tsInfo.duration));
     check('解像度 640x360', tsInfo.width === 640 && tsInfo.height === 360, tsInfo.width + 'x' + tsInfo.height);
@@ -210,7 +217,7 @@ async function main() {
     section('4. 実ダウンロード: HLS (fMP4)');
     const hlsFmp4 = await downloadHls(base + '/hls-fmp4/index.m3u8', opts);
     check('拡張子 mp4', hlsFmp4.parts[0].ext === 'mp4', hlsFmp4.parts[0].ext);
-    const fmp4File = writeOut('hls-fmp4.mp4', hlsFmp4.parts[0].data);
+    const fmp4File = writeOut('hls-fmp4.mp4', partBuf(hlsFmp4.parts[0]));
     const fmp4Info = probeFile(fmp4File);
     check('再生可能で 6 秒', Math.abs(fmp4Info.duration - 6) < 0.5, String(fmp4Info.duration));
     check('解像度 640x360', fmp4Info.width === 640 && fmp4Info.height === 360);
@@ -243,12 +250,12 @@ async function main() {
     check('不正な入力では 0', estimateBytes(0, 60) === 0 && estimateBytes(NaN, 10) === 0);
 
     const best = await downloadHls(base + '/hls-master/master.m3u8', opts);
-    const bestFile = writeOut('hls-best.ts', best.parts[0].data);
+    const bestFile = writeOut('hls-best.ts', partBuf(best.parts[0]));
     const bestInfo = probeFile(bestFile);
     check('既定で最高画質(640x360)を選ぶ', bestInfo.width === 640 && bestInfo.height === 360, bestInfo.width + 'x' + bestInfo.height);
 
     const low = await downloadHls(base + '/hls-master/master.m3u8', { ...opts, variantIndex: 1 });
-    const lowFile = writeOut('hls-low.ts', low.parts[0].data);
+    const lowFile = writeOut('hls-low.ts', partBuf(low.parts[0]));
     const lowInfo = probeFile(lowFile);
     check('画質指定(320x180)が効く', lowInfo.width === 320 && lowInfo.height === 180, lowInfo.width + 'x' + lowInfo.height);
 
@@ -258,8 +265,8 @@ async function main() {
     check('パート数 2（映像/音声）', dash.parts.length === 2, String(dash.parts.length));
     const vPart = dash.parts.find((p) => p.role === 'video');
     const aPart = dash.parts.find((p) => p.role === 'audio');
-    const vFile = writeOut('dash.video.mp4', vPart.data);
-    const aFile = writeOut('dash.audio.mp4', aPart.data);
+    const vFile = writeOut('dash.video.mp4', partBuf(vPart));
+    const aFile = writeOut('dash.audio.mp4', partBuf(aPart));
     const vInfo = probeFile(vFile);
     const aInfo = probeFile(aFile);
     check('映像パートが再生可能', vInfo.hasVideo && Math.abs(vInfo.duration - 6) < 0.6, String(vInfo.duration));
@@ -285,7 +292,7 @@ async function main() {
 
     // IV 省略（メディアシーケンス番号を IV にする。fixture は 7 から始まる）
     const aesResult = await downloadHls(base + '/hls-encrypted/index.m3u8', opts);
-    const aesData = Buffer.from(aesResult.parts[0].data);
+    const aesData = partBuf(aesResult.parts[0]);
     check('復号結果が平文と完全一致する（IV 省略・シーケンス番号から算出）', aesData.equals(plainTs),
       aesData.length + ' vs ' + plainTs.length);
     check('コンテナを ts と判定', aesResult.parts[0].ext === 'ts', aesResult.parts[0].ext);
@@ -295,7 +302,7 @@ async function main() {
 
     // IV 明示（0X 大文字の接頭辞）
     const aesIvResult = await downloadHls(base + '/hls-encrypted-iv/index.m3u8', opts);
-    const aesIvData = Buffer.from(aesIvResult.parts[0].data);
+    const aesIvData = partBuf(aesIvResult.parts[0]);
     check('復号結果が平文と完全一致する（IV 明示・0X 接頭辞）', aesIvData.equals(plainTs),
       aesIvData.length + ' vs ' + plainTs.length);
 

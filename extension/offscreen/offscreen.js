@@ -32,10 +32,14 @@ async function handleDownload(msg) {
     });
 
     const parts = result.parts.map((part) => {
-      const blob = new Blob([part.data], { type: MIME_BY_EXT[part.ext] || 'application/octet-stream' });
+      // セグメントを連結せずそのまま渡す。Blob のサイズ検査はパート単位なので
+      // 4GiB 級のファイルでも通り、巨大バッファのコピーも起きない。
+      const blob = new Blob(part.chunks, { type: MIME_BY_EXT[part.ext] || 'application/octet-stream' });
       const blobUrl = URL.createObjectURL(blob);
       entry.blobUrls.push(blobUrl);
-      return { role: part.role, ext: part.ext, bytes: part.data.length, blobUrl };
+      // Blob 化が済めばセグメントは不要。参照を切って GC に回す。
+      part.chunks.length = 0;
+      return { role: part.role, ext: part.ext, bytes: blob.size, blobUrl };
     });
 
     return { ok: true, parts, duration: result.duration || 0 };

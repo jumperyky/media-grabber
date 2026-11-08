@@ -1,5 +1,20 @@
 # 変更履歴
 
+## 1.5.1
+
+### 修正
+- 大きな動画のダウンロードが
+  `Failed to construct 'Blob': The ArrayBuffer/ArrayBufferView size exceeds the supported range.`
+  で失敗する問題を直した。全セグメントを 1 本の `Uint8Array` に連結してから `Blob` に渡していたため、
+  Blob 側のサイズ上限（Blink の内部サイズ型が 32bit なので約 4GiB）に当たっていた。
+  セグメントの配列のまま `new Blob(chunks)` へ渡すようにした。サイズ検査はパート単位になるので上限に当たらず、
+  連結用のバッファを確保しなくなるぶんピークメモリもおよそ半分になる
+- コンテナ形式の判定を先頭 256 バイトだけで行うようにした（連結済みバッファが不要になったため）
+
+### 内部
+- `downloadHls` / `downloadDash` が返すパートの形を `{ data: Uint8Array }` から
+  `{ chunks: Uint8Array[], bytes: number }` に変更した
+
 ## 1.5.0
 
 AES-128 対応の作業ブランチ（`Moviedownloader_AES128support`）を本体に統合した。

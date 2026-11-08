@@ -101,6 +101,30 @@ export function concatBytes(parts) {
   return out;
 }
 
+/** Uint8Array の配列の合計バイト数。 */
+export function totalBytes(chunks) {
+  let total = 0;
+  for (const c of chunks) total += c ? c.length : 0;
+  return total;
+}
+
+/**
+ * コンテナ判定用に先頭数百バイトだけ取り出す。
+ * 全体を連結しないで済ませるためのもの。
+ */
+function headerSample(chunks, n = 256) {
+  const out = new Uint8Array(n);
+  let offset = 0;
+  for (const c of chunks) {
+    if (!c || !c.length) continue;
+    const take = Math.min(c.length, n - offset);
+    out.set(c.subarray(0, take), offset);
+    offset += take;
+    if (offset >= n) break;
+  }
+  return offset === n ? out : out.subarray(0, offset);
+}
+
 /** AES-128 復号用のヘルパー関数 */
 async function decryptSegment(ciphertext, keyBuf, ivBuf) {
   const key = await crypto.subtle.importKey(
@@ -168,11 +192,13 @@ async function downloadHlsMedia(playlistUrl, opts) {
     }
   }
 
-  const data = concatBytes(got.parts);
+  // 全体を 1 本のバッファに連結しない。Blob は複数パートを受け取れるので、
+  // セグメントの配列のまま返して巨大バッファのコピーとサイズ上限を避ける。
+  const chunks = got.parts.filter(Boolean);
   return {
-    data,
-    bytes: got.bytes,
-    container: sniffContainer(data),
+    chunks,
+    bytes: totalBytes(chunks),
+    container: sniffContainer(headerSample(chunks)),
     duration: playlist.duration,
     isLive: playlist.isLive,
   };
@@ -190,7 +216,7 @@ export async function downloadHls(manifestUrl, opts = {}) {
   if (parsed.type === 'media') {
     const r = await downloadHlsMedia(manifestUrl, opts);
     return {
-      parts: [{ role: 'video', data: r.data, ext: containerToExt(r.container) }],
+      parts: [{ role: 'video', chunks: r.chunks, bytes: r.bytes, ext: containerToExt(r.container) }],
       duration: r.duration,
       isLive: r.isLive,
     };
@@ -201,7 +227,7 @@ export async function downloadHls(manifestUrl, opts = {}) {
   const variant = parsed.variants[Math.max(0, Math.min(index, parsed.variants.length - 1))];
 
   const video = await downloadHlsMedia(variant.url, opts);
-  const parts = [{ role: 'video', data: video.data, ext: containerToExt(video.container) }];
+  const parts = [{ role: 'video', chunks: video.chunks, bytes: video.bytes, ext: containerToExt(video.container) }];
 
   // 音声が別レンディションとして分離している場合は併せて取得する
   let audio = null;
@@ -212,7 +238,7 @@ export async function downloadHls(manifestUrl, opts = {}) {
   }
   if (audio && audio.url) {
     const a = await downloadHlsMedia(audio.url, opts);
-    parts.push({ role: 'audio', data: a.data, ext: containerToExt(a.container) });
+    parts.push({ role: 'audio', chunks: a.chunks, bytes: a.bytes, ext: containerToExt(a.container) });
   }
 
   return { parts, duration: video.duration, isLive: video.isLive, variant };
@@ -246,8 +272,13 @@ export async function downloadDash(manifestUrl, opts = {}) {
     for (const u of rep.segmentUrls) list.push({ url: u });
     if (!list.length) throw new DownloadError('セグメントが見つかりません', 'NO_SEGMENTS');
     const got = await fetchAllSegments(list, opts);
-    const data = concatBytes(got.parts);
-    parts.push({ role: item.role, data, ext: containerToExt(sniffContainer(data)) });
+    const chunks = got.parts.filter(Boolean);
+    parts.push({
+      role: item.role,
+      chunks,
+      bytes: totalBytes(chunks),
+      ext: containerToExt(sniffContainer(headerSample(chunks))),
+    });
   }
 
   return { parts, duration: parsed.duration };
