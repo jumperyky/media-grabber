@@ -177,6 +177,42 @@ function buildPath(subfolder, filename) {
   return folder ? folder + '/' + filename : filename;
 }
 
+/**
+ * 自分が開始したダウンロードに付けたいファイル名。URL をキーにする。
+ *
+ * chrome.downloads.download() に渡す filename は「提案」でしかなく、
+ * 他の拡張機能が downloads.onDeterminingFilename で suggest() を
+ * 引数なしで呼ぶと破棄され、ブラウザ既定の名前（blob URL なら UUID、
+ * data URL なら "ダウンロード"）で保存されてしまう。
+ * 例: Video Download Helper は自分以外のダウンロードに対して suggest() を
+ * 引数なしで呼ぶため、同時に有効だとこちらの名前が消える。
+ * 自分の分は自分で名乗り返すことで取り戻す。
+ */
+const pendingNames = new Map();
+
+// MV3 の Service Worker は起動直後に同期でリスナーを登録する必要がある。
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  // 自分が始めたもの以外は口を出さない（他の拡張機能の邪魔をしない）
+  if (item.byExtensionId !== chrome.runtime.id) return;
+  const key = pendingNames.has(item.url) ? item.url
+    : (pendingNames.has(item.finalUrl) ? item.finalUrl : null);
+  if (!key) return;
+  const filename = pendingNames.get(key);
+  pendingNames.delete(key);
+  suggest({ filename, conflictAction: 'uniquify' });
+});
+
+/** 名前を名乗れるようにしたうえで chrome.downloads.download を呼ぶ。 */
+async function startSave(options) {
+  if (options.filename) pendingNames.set(options.url, options.filename);
+  try {
+    return await chrome.downloads.download(options);
+  } finally {
+    // リスナーが呼ばれなかった場合に備えて残骸を片付ける
+    setTimeout(() => pendingNames.delete(options.url), 60000);
+  }
+}
+
 function notifyPopup(message) {
   chrome.runtime.sendMessage(message).catch(() => { /* ポップアップが閉じている場合は無視 */ });
 }
@@ -206,7 +242,7 @@ async function downloadDirect(item, settings) {
   })();
 
   const filename = suggestFilename({ title: item.title, url: item.url, ext });
-  const downloadId = await chrome.downloads.download({
+  const downloadId = await startSave({
     url: item.url,
     filename: buildPath(settings.subfolder, filename),
     saveAs: settings.saveAs,
@@ -244,7 +280,7 @@ async function downloadStreamJob(jobId, item, settings, variantIndex) {
     const suffix = multi ? (part.role === 'audio' ? '.audio' : '.video') : '';
     const base = suggestFilename({ title: item.title, url: item.url, ext: part.ext });
     const filename = base.replace(/\.([a-z0-9]+)$/i, suffix + '.$1');
-    const downloadId = await chrome.downloads.download({
+    const downloadId = await startSave({
       url: part.blobUrl,
       filename: buildPath(settings.subfolder, filename),
       saveAs: settings.saveAs,
@@ -334,8 +370,9 @@ async function saveHelperBat(files, settings) {
   if (!content) return null;
 
   try {
-    const downloadId = await chrome.downloads.download({
-      url: bytesToDataUrl(encodeBatchFile(content)),
+    const dataUrl = bytesToDataUrl(encodeBatchFile(content));
+    const downloadId = await startSave({
+      url: dataUrl,
       filename: buildPath(settings.subfolder, batName),
       saveAs: false,
       conflictAction: 'uniquify',
@@ -345,6 +382,27 @@ async function saveHelperBat(files, settings) {
     // .bat の保存に失敗しても動画本体の保存は成功しているので、そのまま続ける
     return null;
   }
+}
+
+/**
+ * 希望した名前で保存できたかを確かめる。
+ * onDeterminingFilename は「最後にインストールされた拡張機能」の提案が通るため、
+ * あとからダウンロード系の拡張機能を入れると、こちらの名前が負けることがある。
+ * そのときに「なぜか変な名前になる」で終わらせないための検知。
+ */
+async function detectRenamed(files) {
+  // 同名ファイルがあると Chrome が "名前 (1).ts" にする。これは書き換えではない。
+  const stripSerial = (name) => String(name).replace(/ \((\d+)\)(?=\.[^.]*$|$)/, '');
+  for (const f of files) {
+    const want = String(f.filename || '').split('/').pop();
+    const got = await resolveSavedName(f.downloadId);
+    if (!want || !got || stripSerial(got) === stripSerial(want)) continue;
+    return 'ファイル名が「' + got + '」に書き換えられました。'
+      + 'ダウンロード系の拡張機能（Video Download Helper など）が有効だと、'
+      + 'そちらの指定が優先されることがあります。'
+      + '無効にするか、chrome://extensions でこの拡張機能を読み込み直してください。';
+  }
+  return null;
 }
 
 async function startDownload({ tabId, itemId, variantIndex }) {
@@ -382,7 +440,8 @@ async function startDownload({ tabId, itemId, variantIndex }) {
       }
       // 実際の保存先を控えて、設定した場所と食い違っていないか確認できるようにする
       const savedDir = files.length ? await resolveSavedDir(files[0].downloadId) : null;
-      setJob(jobId, { state: 'done', files, savedDir });
+      const warning = await detectRenamed(files);
+      setJob(jobId, { state: 'done', files, savedDir, warning });
     } catch (err) {
       await clearRefererRule(jobId);
       setJob(jobId, { state: 'error', error: err?.message || String(err) });

@@ -14,6 +14,10 @@ const extDir = path.join(here, '..', 'extension');
 const fixtures = path.join(here, 'fixtures');
 const pageDir = path.join(here, 'page');
 const downloadDir = path.join(here, 'e2e-downloads');
+// 他の拡張機能にファイル名を奪われないことを確かめるため、
+// downloads.onDeterminingFilename で suggest() を引数なしで呼ぶ拡張機能を一緒に読み込む。
+// （Video Download Helper が実際にこの振る舞いをする）
+const rivalDir = path.join(here, 'rival-extension');
 // 名前を直書きすると manifest のリネームで別の内蔵拡張を掴んでしまう
 const manifestName = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8')).name;
 
@@ -157,8 +161,8 @@ async function main() {
   section('0. Chrome を起動して拡張機能を読み込む');
   const { child, cdp } = launchChrome(chromePath, [
     '--user-data-dir=' + profileDir,
-    '--load-extension=' + extDir,
-    '--disable-extensions-except=' + extDir,
+    '--load-extension=' + rivalDir + ',' + extDir,
+    '--disable-extensions-except=' + rivalDir + ',' + extDir,
     '--enable-unsafe-extension-debugging',
     '--no-first-run',
     '--no-default-browser-check',
@@ -172,6 +176,20 @@ async function main() {
       return true;
     }, 30000, 500);
     check('Chrome が起動した', true);
+
+    // 対抗拡張機能が入っていないと、ファイル名の奪い合いを検証できない
+    const rivalName = JSON.parse(fs.readFileSync(path.join(rivalDir, 'manifest.json'), 'utf8')).name;
+    const rivalLoaded = await waitFor('対抗拡張機能', async () => {
+      for (const t of await cdp.getTargets()) {
+        if (t.type !== 'service_worker' || !t.url.startsWith('chrome-extension://')) continue;
+        const sid = await cdp.attach(t.targetId);
+        try {
+          if (await cdp.evaluate(sid, 'chrome.runtime.getManifest().name') === rivalName) return true;
+        } catch { /* まだ起動中 */ }
+      }
+      return null;
+    }, 30000, 500).catch(() => false);
+    check('ファイル名を奪う拡張機能を一緒に読み込んだ', rivalLoaded === true);
 
     // 拡張機能の Service Worker を見つけて、それが自分の拡張か確認する
     const swInfo = await waitFor('拡張機能の Service Worker', async () => {

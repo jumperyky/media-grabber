@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Rival Download Manager (test only)",
+  "version": "1.0.0",
+  "description": "E2E 用。他の拡張機能が指定したファイル名を奪う拡張機能を再現する。",
+  "permissions": ["downloads"],
+  "background": { "service_worker": "sw.js" }
+}

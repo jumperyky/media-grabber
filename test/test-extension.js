@@ -97,9 +97,11 @@ function listenerSlot(assign) {
 }
 
 let offscreenResponder = async () => ({ ok: false, error: 'stub 未設定' });
+let determiningFilenameListener = null;
 
 globalThis.chrome = {
   runtime: {
+    id: 'mediagrabber-test-id',
     onMessage: listenerSlot((fn) => { messageListener = fn; }),
     sendMessage: async (msg) => {
       if (msg && msg.target === 'offscreen') return offscreenResponder(msg);
@@ -134,6 +136,7 @@ globalThis.chrome = {
     },
     // 保存後のファイル名・保存先を引く。実際の Chrome と同じく絶対パスを返す。
     search: async ({ id }) => (savedPaths[id] ? [{ id, filename: savedPaths[id] }] : []),
+    onDeterminingFilename: listenerSlot((fn) => { determiningFilenameListener = fn; }),
   },
   offscreen: {
     createDocument: async () => { calls.offscreenCreated += 1; },
@@ -268,6 +271,39 @@ check('MP4 化用の .bat も保存する',
 check('.bat は data URL で渡す', calls.downloads[2].url.startsWith('data:'));
 check('実際の保存先を控える',
   doneJob && doneJob.savedDir === DOWNLOAD_ROOT + 'MediaGrabber', doneJob && doneJob.savedDir);
+
+// ---------------------------------------------------------------------------
+// 他の拡張機能（Video Download Helper など）が onDeterminingFilename で
+// suggest() を引数なしで呼ぶと、download() に渡した filename が捨てられ、
+// blob URL の UUID や "ダウンロード" で保存されてしまう。自分で名乗り返せるか。
+section('4b. ファイル名を他の拡張機能に奪われないこと');
+check('onDeterminingFilename を購読している', typeof determiningFilenameListener === 'function');
+
+function askFilename(item) {
+  let suggested = 'NOT_CALLED';
+  determiningFilenameListener(item, (s2) => { suggested = s2; });
+  return suggested;
+}
+
+const videoDl = calls.downloads[0];
+const suggestedVideo = askFilename({
+  byExtensionId: chrome.runtime.id, url: videoDl.url, finalUrl: videoDl.url,
+});
+check('自分のダウンロードには希望のファイル名を名乗る',
+  suggestedVideo && suggestedVideo.filename === 'MediaGrabber/サンプル動画のページ.video.mp4',
+  JSON.stringify(suggestedVideo));
+check('重複時の扱いも併せて指定する',
+  suggestedVideo && suggestedVideo.conflictAction === 'uniquify');
+
+const batDl = calls.downloads[2];
+check('.bat（data URL）でも名乗る',
+  askFilename({ byExtensionId: chrome.runtime.id, url: batDl.url, finalUrl: batDl.url })
+    .filename === batDl.filename);
+
+check('他の拡張機能のダウンロードには口を出さない',
+  askFilename({ byExtensionId: 'other-extension', url: 'blob:x', finalUrl: 'blob:x' }) === 'NOT_CALLED');
+check('覚えのない URL には口を出さない',
+  askFilename({ byExtensionId: chrome.runtime.id, url: 'blob:unknown', finalUrl: 'blob:unknown' }) === 'NOT_CALLED');
 
 // ---------------------------------------------------------------------------
 section('5. エラーと後片付け');
